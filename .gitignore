@@ -1,0 +1,14 @@
+data/
+*.db
+*.sqlite
+__pycache__/
+*.pyc
+.env
+build/
+*.bin
+*.elf
+node_modules/
+.venv/
+wandb/
+checkpoints/
+*.onnx

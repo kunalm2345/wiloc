@@ -1,0 +1,39 @@
+# Experiment configuration template
+# Copy and modify for each data collection session
+
+experiment:
+  name: "test_hallway_01"
+  date: "2026-04-05"
+  location: "Building A, 2nd floor hallway"
+  notes: ""
+
+anchors:
+  - id: "anchor_01"
+    position: [0.0, 0.0, 1.2]    # x, y, z in meters
+    esp32_port: "/dev/ttyUSB0"
+    rpi_host: "rpi-01.local"
+  - id: "anchor_02"
+    position: [10.0, 0.0, 1.2]
+    esp32_port: "/dev/ttyUSB0"
+    rpi_host: "rpi-02.local"
+  - id: "anchor_03"
+    position: [5.0, 8.0, 1.2]
+    esp32_port: "/dev/ttyUSB0"
+    rpi_host: "rpi-03.local"
+
+mobile:
+  esp32_port: "/dev/ttyUSB1"
+  mac_address: "AA:BB:CC:DD:EE:FF"
+
+collection:
+  wifi_channel: 6
+  bandwidth_mhz: 20
+  packet_rate_hz: 100     # CSI packets per second target
+
+grid:
+  # Reference points for fingerprinting
+  origin: [0.0, 0.0]
+  spacing_m: 1.0
+  rows: 10
+  cols: 10
+  dwell_time_s: 30        # Time to stand at each point
