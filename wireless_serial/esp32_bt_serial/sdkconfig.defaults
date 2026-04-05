@@ -1,0 +1,29 @@
+# WiLoc ESP32-C5 Anchor — sdkconfig defaults
+# BLE (NimBLE) + WiFi CSI + coexistence
+
+# Bluetooth — NimBLE only (ESP32-C5 has no Classic BT)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+
+# WiFi
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+
+# Coexistence (WiFi + BLE sharing 2.4GHz radio)
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# Performance
+CONFIG_FREERTOS_HZ=1000
+
+# Partition table — larger app partition for BT+WiFi
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# WiLoc device config (override per device during flash)
+CONFIG_WILOC_DEVICE_ID="anc_00"
+CONFIG_WILOC_WIFI_CHANNEL=6

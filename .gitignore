@@ -12,3 +12,7 @@ node_modules/
 wandb/
 checkpoints/
 *.onnx
+sdkconfig
+sdkconfig.old
+.cache/
+managed_components/
