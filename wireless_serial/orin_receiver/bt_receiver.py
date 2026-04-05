@@ -127,6 +127,12 @@ class AnchorConnection:
     def _notification_handler(self, sender, data: bytearray):
         """Called when ESP32 sends a BLE notification (CSI/RSSI/heartbeat/etc)."""
         self._rx_buf.extend(data)
+        self._notify_count = getattr(self, '_notify_count', 0) + 1
+
+        # Debug: log first few notifications per anchor
+        if self._notify_count <= 3:
+            print(f"  [{self.anchor_id}] notify #{self._notify_count}: {len(data)} bytes, "
+                  f"buf={len(self._rx_buf)}, first4={data[:4].hex()}")
 
         while True:
             result = decode_frame(self._rx_buf)
@@ -136,6 +142,10 @@ class AnchorConnection:
             ptype, payload, _ = result
             self.packets_received += 1
             self._handle_packet(ptype, payload)
+            # Log first successful parse
+            if self.packets_received <= 2:
+                print(f"  [{self.anchor_id}] parsed pkt #{self.packets_received}: "
+                      f"type=0x{ptype:02x} len={len(payload)}")
 
             self._commit_counter += 1
             if self._commit_counter >= 50:
@@ -144,7 +154,7 @@ class AnchorConnection:
                 self._commit_counter = 0
 
     def _handle_packet(self, ptype: int, payload: bytes):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now().isoformat()
 
         if ptype == PacketType.CSI_DATA:
             try:

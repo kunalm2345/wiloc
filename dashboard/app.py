@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "simulator"))
 # ──────────────────────────────────────────────
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
+KNOWN_DEVICES_FILE = Path(__file__).parent / "known_devices.json"
 
 DEFAULT_ROOM = {"width": 4.0, "depth": 4.0, "height": 3.0}
 DEFAULT_ANCHORS = {
@@ -52,6 +53,14 @@ def load_settings() -> dict:
 def save_settings(settings: dict):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=2)
+
+
+def _load_known_devices() -> dict[str, str]:
+    """Load MAC -> friendly name mapping from known_devices.json."""
+    if KNOWN_DEVICES_FILE.exists():
+        with open(KNOWN_DEVICES_FILE) as f:
+            return json.load(f)
+    return {}
 
 
 # ──────────────────────────────────────────────
@@ -125,21 +134,49 @@ class CSIStore:
         conn.close()
         return {"total": total, "per_anchor": per_anchor}
 
-    def get_pkt_rate(self, target_mac: str = None, window_sec: float = 5.0) -> dict:
-        """Packets per second per anchor over the last window_sec seconds."""
+    def get_anchor_liveness(self, target_mac: str = None, window_sec: float = 5.0) -> dict:
+        """Per-anchor: pkt/sec over window + seconds since last packet."""
         conn = sqlite3.connect(self.db_path)
-        cutoff = (datetime.utcnow().timestamp() - window_sec)
-        cutoff_iso = datetime.utcfromtimestamp(cutoff).isoformat()
+        cutoff_iso = (datetime.now() - __import__('datetime').timedelta(seconds=window_sec)).isoformat()
         if target_mac:
             rows = conn.execute(
-                "SELECT anchor_id, COUNT(*) FROM csi_readings WHERE collected_at > ? AND target_mac = ? GROUP BY anchor_id",
+                """SELECT anchor_id, COUNT(*), MAX(collected_at)
+                   FROM csi_readings WHERE collected_at > ? AND target_mac = ?
+                   GROUP BY anchor_id""",
                 (cutoff_iso, target_mac)).fetchall()
+            # Also get last_seen for anchors with no recent data
+            all_last = conn.execute(
+                """SELECT anchor_id, MAX(collected_at)
+                   FROM csi_readings WHERE target_mac = ? GROUP BY anchor_id""",
+                (target_mac,)).fetchall()
         else:
             rows = conn.execute(
-                "SELECT anchor_id, COUNT(*) FROM csi_readings WHERE collected_at > ? GROUP BY anchor_id",
-                (cutoff_iso,)).fetchall()
+                """SELECT anchor_id, COUNT(*), MAX(collected_at)
+                   FROM csi_readings WHERE collected_at > ?
+                   GROUP BY anchor_id""", (cutoff_iso,)).fetchall()
+            all_last = conn.execute(
+                "SELECT anchor_id, MAX(collected_at) FROM csi_readings GROUP BY anchor_id").fetchall()
         conn.close()
-        return {r[0]: round(r[1] / window_sec, 1) for r in rows}
+
+        now = datetime.now()
+        result = {}
+        # Fill in last_seen for all known anchors
+        for aid, last_at in all_last:
+            try:
+                last_dt = datetime.fromisoformat(last_at)
+                age = (now - last_dt).total_seconds()
+            except Exception:
+                age = 9999.0
+            result[aid] = {"rate": 0.0, "age_sec": age}
+        # Overlay rate for anchors with recent data
+        for aid, count, last_at in rows:
+            result[aid]["rate"] = round(count / window_sec, 1)
+            try:
+                last_dt = datetime.fromisoformat(last_at)
+                result[aid]["age_sec"] = (now - last_dt).total_seconds()
+            except Exception:
+                pass
+        return result
 
     def get_top_macs(self, limit: int = 10) -> list[dict]:
         conn = sqlite3.connect(self.db_path)
@@ -183,13 +220,15 @@ def trilaterate_2d(anchors: np.ndarray, distances: np.ndarray) -> np.ndarray:
     return result.x
 
 
-def estimate_ap_position(recent_data: list[dict], anchor_positions: dict) -> dict | None:
+def estimate_ap_position(data_by_anchor: dict, anchor_positions: dict) -> dict | None:
+    """Estimate AP position from per-anchor CSI data (not a mixed recent window)."""
     rssi_by_anchor = {}
-    for row in recent_data:
-        aid = row.get("anchor_id")
-        rssi = row.get("rssi")
-        if aid and rssi is not None and aid in anchor_positions:
-            rssi_by_anchor.setdefault(aid, []).append(rssi)
+    for aid, rows in data_by_anchor.items():
+        if aid not in anchor_positions:
+            continue
+        rssis = [r["rssi"] for r in rows if r.get("rssi") is not None]
+        if rssis:
+            rssi_by_anchor[aid] = rssis
     if len(rssi_by_anchor) < 3:
         return None
     anchors, distances, rssi_avgs = [], [], {}
@@ -309,11 +348,19 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
     app = Dash(__name__, suppress_callback_exceptions=True)
     app.title = "WiLoc Dashboard"
 
+    # Known device name lookup — add your devices here
+    known_devices = _load_known_devices()
+
+    def _mac_label(m: dict) -> str:
+        mac = m["mac"]
+        name = known_devices.get(mac, "")
+        prefix = f"[{name}] " if name else ""
+        return f"{prefix}{mac}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']} anchors)"
+
     top_macs = store.get_top_macs(15)
     mac_options = [{"label": "All MACs (mixed)", "value": "__all__"}]
     for m in top_macs:
-        label = f"{m['mac']}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']} anchors)"
-        mac_options.append({"label": label, "value": m["mac"]})
+        mac_options.append({"label": _mac_label(m), "value": m["mac"]})
     default_mac = "__all__"
     for m in top_macs:
         if m["n_anchors"] >= 4:
@@ -481,10 +528,13 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
     @app.callback(Output('mac-selector', 'options'),
                   [Input('refresh-macs-btn', 'n_clicks')], prevent_initial_call=True)
     def refresh_mac_list(n_clicks):
+        refreshed_names = _load_known_devices()
         macs = store.get_top_macs(15)
         options = [{"label": "All MACs (mixed)", "value": "__all__"}]
         for m in macs:
-            label = f"{m['mac']}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']} anchors)"
+            name = refreshed_names.get(m["mac"], "")
+            prefix = f"[{name}] " if name else ""
+            label = f"{prefix}{m['mac']}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']} anchors)"
             options.append({"label": label, "value": m["mac"]})
         return options
 
@@ -503,13 +553,13 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
 
         stats = store.get_stats(target_mac)
         recent = store.get_recent(WINDOW_SIZE, target_mac)
-        pkt_rates = store.get_pkt_rate(target_mac, window_sec=float(UPDATE_INTERVAL_MS) / 1000)
+        liveness = store.get_anchor_liveness(target_mac, window_sec=float(UPDATE_INTERVAL_MS) / 1000)
 
         data_by_anchor = {}
         for aid in cur_anchors:
             data_by_anchor[aid] = store.get_recent_by_anchor(aid, 50, target_mac)
 
-        ap_pos = estimate_ap_position(recent, cur_anchors)
+        ap_pos = estimate_ap_position(data_by_anchor, cur_anchors)
 
         room_fig = build_room_figure(cur_room, cur_anchors, ap_pos)
         waterfall_fig = build_csi_waterfall(data_by_anchor)
@@ -520,22 +570,38 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
         if stats['total'] == 0:
             status = "Waiting for CSI data..."
 
-        # Anchor status cards with live pkt/sec
+        stale_threshold = UPDATE_INTERVAL_MS / 1000 * 2  # 2x interval = stale
+
+        # Anchor status cards with accurate liveness
         cards = []
         for aid in sorted(cur_anchors.keys()):
             info = stats["per_anchor"].get(aid, {})
             count = info.get("count", 0)
             avg_rssi = info.get("avg_rssi", "—")
-            rate = pkt_rates.get(aid, 0.0)
-            is_live = rate > 0
-            color = '#4daf4a' if is_live else ('#ffc107' if count > 0 else '#ccc')
+            live = liveness.get(aid, {"rate": 0.0, "age_sec": 9999})
+            rate = live["rate"]
+            age = live["age_sec"]
+
+            if rate > 0 and age < stale_threshold:
+                color = '#4daf4a'  # green — live data flowing
+                age_text = f"{rate} pkt/s"
+            elif count > 0 and age < 30:
+                color = '#ffc107'  # yellow — recent but slowed
+                age_text = f"last {age:.0f}s ago"
+            elif count > 0:
+                color = '#dc3545'  # red — stale
+                age_text = f"stale ({age:.0f}s ago)"
+            else:
+                color = '#ccc'     # grey — never seen
+                age_text = "no data"
+
             cards.append(html.Div([
                 html.Div(style={
                     'width': '10px', 'height': '10px', 'borderRadius': '50%',
                     'background': color, 'display': 'inline-block', 'marginRight': '8px'}),
                 html.Span(f"{aid}", style={'fontWeight': 'bold'}),
-                html.Span(f"  {rate} pkt/s",
-                          style={'color': '#007bff', 'fontSize': '12px', 'fontWeight': 'bold', 'marginLeft': '6px'}),
+                html.Span(f"  {age_text}",
+                          style={'color': color, 'fontSize': '12px', 'fontWeight': 'bold', 'marginLeft': '6px'}),
                 html.Br(),
                 html.Span(f"  {count} total, RSSI: {avg_rssi} dBm",
                           style={'color': '#666', 'fontSize': '11px', 'marginLeft': '18px'}),
