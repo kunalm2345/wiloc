@@ -1,0 +1,107 @@
+# Room Experiment Configuration
+# 4x4m room with 4 ESP32 anchors at corners, 1 AP target to localize
+
+experiment:
+  name: "room_localization_v1"
+  description: "Precise AP localization in 4x4m room with 4 anchors"
+  target_accuracy_m: 0.10  # 10cm goal
+
+room:
+  width_m: 4.0
+  depth_m: 4.0
+  height_m: 3.0
+  wall_material: "concrete"   # adjust to your actual room
+  # Measure your room! These need to be accurate for simulation calibration.
+
+anchors:
+  # All 4 ESP32s at corners, same height, same orientation
+  # IMPORTANT: measure these positions precisely (use tape measure from one corner)
+  - id: "anchor_00"
+    position: [0.1, 0.1, 1.2]      # (x, y, z) in meters from room origin (corner)
+    esp32_mac: "XX:XX:XX:XX:XX:00"  # fill in after flashing
+    rpi_host: "rpi-01.local"
+    usb_port: "/dev/ttyUSB0"
+
+  - id: "anchor_01"
+    position: [3.9, 0.1, 1.2]
+    esp32_mac: "XX:XX:XX:XX:XX:01"
+    rpi_host: "rpi-01.local"        # can share RPi if 2 USB ports
+    usb_port: "/dev/ttyUSB1"
+
+  - id: "anchor_02"
+    position: [3.9, 3.9, 1.2]
+    esp32_mac: "XX:XX:XX:XX:XX:02"
+    rpi_host: "rpi-02.local"
+    usb_port: "/dev/ttyUSB0"
+
+  - id: "anchor_03"
+    position: [0.1, 3.9, 1.2]
+    esp32_mac: "XX:XX:XX:XX:XX:03"
+    rpi_host: "rpi-02.local"
+    usb_port: "/dev/ttyUSB1"
+
+target_ap:
+  # The 5th ESP32 acts as the AP we're trying to localize
+  esp32_mac: "XX:XX:XX:XX:XX:04"
+  mode: "softap"                    # run as soft AP, broadcasting beacons
+  channel: 6
+  beacon_interval_ms: 100           # beacon every 100ms = 10 CSI/sec
+
+obstacles:
+  # Measure these from the same room origin corner
+  - name: "table"
+    center: [2.0, 2.0, 0.375]
+    size: [1.2, 0.6, 0.75]         # width, depth, height
+    material: "wood"
+
+  - name: "almirah"
+    center: [3.2, 3.75, 0.9]
+    size: [1.0, 0.5, 1.8]
+    material: "wood"
+
+  # Add any other furniture here:
+  # - name: "chair"
+  #   center: [1.5, 1.5, 0.4]
+  #   size: [0.5, 0.5, 0.8]
+  #   material: "wood"
+
+data_collection:
+  # Phase 1: Fingerprint grid — walk the AP to each point
+  grid:
+    origin: [0.3, 0.3]             # start point (stay 30cm from walls)
+    spacing_m: 0.25                 # 25cm grid = 196 points in a 4x4m room
+    rows: 14                        # (4.0 - 0.6) / 0.25 = 13.6 → 14
+    cols: 14
+    dwell_time_s: 15                # stand at each point for 15 seconds
+    ap_height_m: 1.0               # hold AP at consistent height
+
+  # Phase 2: Fixed positions — AP at known spots, collect more data
+  fixed_positions:
+    - name: "center"
+      position: [2.0, 2.0, 1.0]
+      duration_s: 60
+    - name: "near_table"
+      position: [1.5, 1.8, 1.0]
+      duration_s: 60
+    - name: "near_almirah"
+      position: [2.8, 3.2, 1.0]
+      duration_s: 60
+    - name: "corner_test"
+      position: [0.5, 0.5, 1.0]
+      duration_s: 60
+
+wifi:
+  channel: 6
+  bandwidth_mhz: 20
+  # Use HT20 mode — gives 52 subcarriers, plenty for localization
+  # HT40 gives 114 subcarriers but needs cleaner channel
+
+processing:
+  # Time synchronization between RPis
+  sync_method: "ntp"               # all RPis sync to same NTP server
+  # Alternative: use the Orin Nano as local NTP server for better sync
+
+  # CSI aggregation
+  samples_per_estimate: 20         # average 20 CSI packets per position estimate
+  outlier_removal: true
+  outlier_std_threshold: 2.5
