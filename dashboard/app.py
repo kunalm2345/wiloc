@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import Dash, html, dcc, Input, Output, callback
+from dash import Dash, html, dcc, Input, Output, State, callback
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "processing"))
@@ -40,10 +40,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "simulator"))
 
 DEFAULT_ROOM = {"width": 4.0, "depth": 4.0, "height": 3.0}
 DEFAULT_ANCHORS = {
-    "anchor_00": {"x": 0.1, "y": 0.1, "z": 1.2},
-    "anchor_01": {"x": 3.9, "y": 0.1, "z": 1.2},
-    "anchor_02": {"x": 3.9, "y": 3.9, "z": 1.2},
-    "anchor_03": {"x": 0.1, "y": 3.9, "z": 1.2},
+    "anc_00": {"x": 0.1, "y": 0.1, "z": 1.2},
+    "anc_01": {"x": 3.9, "y": 0.1, "z": 1.2},
+    "anc_02": {"x": 3.9, "y": 3.9, "z": 1.2},
+    "anc_03": {"x": 0.1, "y": 3.9, "z": 1.2},
 }
 
 # How many recent CSI readings to consider per update
@@ -83,32 +83,54 @@ class CSIStore:
         conn.commit()
         conn.close()
 
-    def get_recent(self, n: int = WINDOW_SIZE) -> list[dict]:
+    def get_recent(self, n: int = WINDOW_SIZE, target_mac: str = None) -> list[dict]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM csi_readings ORDER BY id DESC LIMIT ?", (n,)
-        ).fetchall()
+        if target_mac:
+            rows = conn.execute(
+                "SELECT * FROM csi_readings WHERE target_mac = ? ORDER BY id DESC LIMIT ?",
+                (target_mac, n),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM csi_readings ORDER BY id DESC LIMIT ?", (n,)
+            ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
-    def get_recent_by_anchor(self, anchor_id: str, n: int = 50) -> list[dict]:
+    def get_recent_by_anchor(self, anchor_id: str, n: int = 50,
+                              target_mac: str = None) -> list[dict]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM csi_readings WHERE anchor_id = ? ORDER BY id DESC LIMIT ?",
-            (anchor_id, n),
-        ).fetchall()
+        if target_mac:
+            rows = conn.execute(
+                "SELECT * FROM csi_readings WHERE anchor_id = ? AND target_mac = ? ORDER BY id DESC LIMIT ?",
+                (anchor_id, target_mac, n),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM csi_readings WHERE anchor_id = ? ORDER BY id DESC LIMIT ?",
+                (anchor_id, n),
+            ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
-    def get_stats(self) -> dict:
+    def get_stats(self, target_mac: str = None) -> dict:
         conn = sqlite3.connect(self.db_path)
-        total = conn.execute("SELECT COUNT(*) FROM csi_readings").fetchone()[0]
+        if target_mac:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM csi_readings WHERE target_mac = ?", (target_mac,)
+            ).fetchone()[0]
+            query = """SELECT anchor_id, COUNT(*), AVG(rssi), MAX(id)
+                       FROM csi_readings WHERE target_mac = ? GROUP BY anchor_id"""
+            cursor = conn.execute(query, (target_mac,))
+        else:
+            total = conn.execute("SELECT COUNT(*) FROM csi_readings").fetchone()[0]
+            cursor = conn.execute(
+                "SELECT anchor_id, COUNT(*), AVG(rssi), MAX(id) FROM csi_readings GROUP BY anchor_id"
+            )
         per_anchor = {}
-        for row in conn.execute(
-            "SELECT anchor_id, COUNT(*), AVG(rssi), MAX(id) FROM csi_readings GROUP BY anchor_id"
-        ).fetchall():
+        for row in cursor.fetchall():
             per_anchor[row[0]] = {
                 "count": row[1],
                 "avg_rssi": round(row[2], 1) if row[2] else None,
@@ -116,6 +138,22 @@ class CSIStore:
             }
         conn.close()
         return {"total": total, "per_anchor": per_anchor}
+
+    def get_top_macs(self, limit: int = 10) -> list[dict]:
+        """Get the most-seen target MACs, ranked by strongest average RSSI."""
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute("""
+            SELECT target_mac, COUNT(*) as cnt, AVG(rssi) as avg_rssi,
+                   COUNT(DISTINCT anchor_id) as n_anchors
+            FROM csi_readings
+            GROUP BY target_mac
+            HAVING n_anchors >= 3
+            ORDER BY avg_rssi DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        conn.close()
+        return [{"mac": r[0], "count": r[1], "avg_rssi": round(r[2], 1),
+                 "n_anchors": r[3]} for r in rows]
 
 
 # ──────────────────────────────────────────────
@@ -133,12 +171,17 @@ def csi_raw_to_amplitude(csi_raw_json: str) -> np.ndarray:
         return np.array([])
 
 
-def estimate_distance_from_rssi(rssi: float, path_loss_exp: float = 2.2) -> float:
-    """Quick RSSI-to-distance estimate."""
-    tx_power = 20.0
+def estimate_distance_from_rssi(rssi: float, rssi_at_1m: float = -45.0,
+                                path_loss_exp: float = 2.5) -> float:
+    """Quick RSSI-to-distance estimate using log-distance path loss model.
+
+    rssi_at_1m: measured or estimated RSSI at 1 meter from the transmitter.
+                Typical ESP32 in a room: -40 to -50 dBm.
+    path_loss_exp: 2.0 = free space, 2.5-3.5 = indoor with obstacles.
+    """
     if rssi is None or rssi >= 0:
         return 0.0
-    return 10 ** ((tx_power - rssi) / (10 * path_loss_exp))
+    return 10 ** ((rssi_at_1m - rssi) / (10 * path_loss_exp))
 
 
 def trilaterate_2d(anchors: np.ndarray, distances: np.ndarray) -> np.ndarray:
@@ -358,8 +401,8 @@ def build_rssi_timeline(data_by_anchor: dict) -> go.Figure:
     """Build RSSI over time for each anchor."""
     fig = go.Figure()
 
-    colors = {'anchor_00': '#e41a1c', 'anchor_01': '#377eb8',
-              'anchor_02': '#4daf4a', 'anchor_03': '#984ea3'}
+    colors = {'anc_00': '#e41a1c', 'anc_01': '#377eb8',
+              'anc_02': '#4daf4a', 'anc_03': '#984ea3'}
 
     for aid, rows in sorted(data_by_anchor.items()):
         if not rows:
@@ -393,6 +436,20 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
     app = Dash(__name__)
     app.title = "WiLoc Dashboard"
 
+    # Build initial MAC dropdown options
+    top_macs = store.get_top_macs(15)
+    mac_options = [{"label": "All MACs (mixed)", "value": "__all__"}]
+    mac_options.append({"label": "── Strongest signal (best for in-room device) ──", "value": "__all__", "disabled": True})
+    for m in top_macs:
+        label = f"{m['mac']}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']} anchors)"
+        mac_options.append({"label": label, "value": m["mac"]})
+    # Auto-select strongest MAC seen by all 4 anchors
+    default_mac = "__all__"
+    for m in top_macs:
+        if m["n_anchors"] >= 4:
+            default_mac = m["mac"]
+            break
+
     app.layout = html.Div([
         # Header
         html.Div([
@@ -401,6 +458,21 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
         ], style={'display': 'flex', 'justifyContent': 'space-between',
                   'alignItems': 'center', 'padding': '10px 20px',
                   'borderBottom': '2px solid #eee'}),
+
+        # Target MAC selector
+        html.Div([
+            html.Label("Target device (AP):", style={'fontWeight': 'bold', 'marginRight': '10px'}),
+            dcc.Dropdown(
+                id='mac-selector',
+                options=mac_options,
+                value=default_mac,
+                style={'width': '600px', 'fontFamily': 'monospace', 'fontSize': '13px'},
+                clearable=False,
+            ),
+            html.Button("Refresh MACs", id='refresh-macs-btn', n_clicks=0,
+                         style={'marginLeft': '10px', 'padding': '5px 15px'}),
+        ], style={'display': 'flex', 'alignItems': 'center', 'padding': '10px 20px',
+                  'background': '#f8f9fa', 'borderBottom': '1px solid #eee'}),
 
         # Main content
         html.Div([
@@ -442,6 +514,19 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
               'maxWidth': '1400px', 'margin': '0 auto'})
 
     @app.callback(
+        Output('mac-selector', 'options'),
+        [Input('refresh-macs-btn', 'n_clicks')],
+        prevent_initial_call=True,
+    )
+    def refresh_mac_list(n_clicks):
+        macs = store.get_top_macs(15)
+        options = [{"label": "All MACs (mixed)", "value": "__all__"}]
+        for m in macs:
+            label = f"{m['mac']}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']} anchors)"
+            options.append({"label": label, "value": m["mac"]})
+        return options
+
+    @app.callback(
         [Output('room-3d', 'figure'),
          Output('csi-waterfall', 'figure'),
          Output('rssi-timeline', 'figure'),
@@ -449,15 +534,18 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
          Output('anchor-status-cards', 'children'),
          Output('position-estimate', 'children')],
         [Input('interval', 'n_intervals')],
+        [State('mac-selector', 'value')],
     )
-    def update_dashboard(n):
-        stats = store.get_stats()
-        recent = store.get_recent(WINDOW_SIZE)
+    def update_dashboard(n, selected_mac):
+        target_mac = None if selected_mac == "__all__" else selected_mac
+
+        stats = store.get_stats(target_mac)
+        recent = store.get_recent(WINDOW_SIZE, target_mac)
 
         # Per-anchor data
         data_by_anchor = {}
         for aid in anchors:
-            data_by_anchor[aid] = store.get_recent_by_anchor(aid, 50)
+            data_by_anchor[aid] = store.get_recent_by_anchor(aid, 50, target_mac)
 
         # Estimate AP position
         ap_pos = estimate_ap_position(recent, anchors)
@@ -468,7 +556,8 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
         rssi_fig = build_rssi_timeline(data_by_anchor)
 
         # Status text
-        status = f"{stats['total']} packets | {datetime.now().strftime('%H:%M:%S')}"
+        mac_label = f" | MAC: {target_mac}" if target_mac else " | All MACs"
+        status = f"{stats['total']} packets{mac_label} | {datetime.now().strftime('%H:%M:%S')}"
         if stats['total'] == 0:
             status = "Waiting for CSI data... Connect ESP32 anchors via BLE receiver"
 
