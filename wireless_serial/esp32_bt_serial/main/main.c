@@ -44,7 +44,7 @@ static const char *TAG = "wiloc";
 
 /* ── Configuration ── */
 #ifndef CONFIG_WILOC_DEVICE_ID
-#define CONFIG_WILOC_DEVICE_ID "anchor_00"
+#define CONFIG_WILOC_DEVICE_ID "anc_00"
 #endif
 #ifndef CONFIG_WILOC_WIFI_CHANNEL
 #define CONFIG_WILOC_WIFI_CHANNEL 6
