@@ -65,7 +65,11 @@ def init_db(db_path: str) -> sqlite3.Connection:
 
 
 async def discover_devices(scan_time: float = 8.0) -> list[dict]:
-    """Scan for WiLoc ESP32 devices via BLE."""
+    """Scan for WiLoc ESP32 devices via BLE.
+
+    Matches by name prefix 'WiLoc_' OR by service UUID 0xFFE0
+    (IDF master builds may advertise as 'nimble' instead of the custom name).
+    """
     print(f"Scanning for BLE devices ({scan_time}s)...")
 
     discovered = await BleakScanner.discover(timeout=scan_time, return_adv=True)
@@ -73,16 +77,27 @@ async def discover_devices(scan_time: float = 8.0) -> list[dict]:
     wiloc_devices = []
     for addr, (d, adv) in discovered.items():
         name = d.name or ""
-        if name.startswith(WILOC_PREFIX):
-            anchor_id = name.replace(WILOC_PREFIX, "")
-            rssi = adv.rssi if adv else None
+        rssi = adv.rssi if adv else None
+        svc_uuids = adv.service_uuids if adv else []
+
+        # Match by name prefix OR by our service UUID
+        is_wiloc = name.startswith(WILOC_PREFIX)
+        has_svc = WILOC_SVC_UUID in svc_uuids
+
+        if is_wiloc or has_svc:
+            if is_wiloc:
+                anchor_id = name.replace(WILOC_PREFIX, "")
+            else:
+                # Fallback: use address as anchor_id, user can rename later
+                anchor_id = f"unknown_{addr[-5:].replace(':', '').lower()}"
             wiloc_devices.append({
                 "address": d.address,
                 "name": name,
                 "anchor_id": anchor_id,
                 "rssi": rssi,
             })
-            print(f"  Found: {name} ({d.address}) RSSI={rssi}dBm")
+            print(f"  Found: {name} ({d.address}) RSSI={rssi}dBm"
+                  f"{' [matched by UUID]' if has_svc and not is_wiloc else ''}")
 
     if not wiloc_devices:
         print("  No WiLoc devices found. Check ESP32s are powered and flashed.")

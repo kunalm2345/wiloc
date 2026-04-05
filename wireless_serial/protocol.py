@@ -182,14 +182,14 @@ def encode_csi_payload(
 
 def decode_csi_payload(payload: bytes) -> dict:
     """Unpack a CSI_DATA payload into a dict."""
-    if len(payload) < 22:
+    if len(payload) < 23:
         raise ValueError(f"CSI payload too short: {len(payload)}")
     timestamp_ms = struct.unpack(">I", payload[0:4])[0]
     anchor_id = payload[4:12].rstrip(b"\x00").decode("ascii", errors="replace")
     mac_bytes = payload[12:18]
     target_mac = ":".join(f"{b:02x}" for b in mac_bytes)
-    rssi, channel, bandwidth, csi_len = struct.unpack(">bBBH", payload[18:22])
-    csi_raw = list(payload[22:22 + csi_len])
+    rssi, channel, bandwidth, csi_len = struct.unpack(">bBBH", payload[18:23])
+    csi_raw = list(payload[23:23 + csi_len])
     return {
         "timestamp_ms": timestamp_ms,
         "anchor_id": anchor_id,
