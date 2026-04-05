@@ -7,31 +7,30 @@
   "ble_service_uuid": "0000ffe0-0000-1000-8000-00805f9b34fb",
   "ble_tx_char_uuid": "0000ffe1-0000-1000-8000-00805f9b34fb",
   "ble_rx_char_uuid": "0000ffe2-0000-1000-8000-00805f9b34fb",
-  "note": "Device IDs shortened to 6 chars (anc_XX) to fit 8-byte protocol field",
   "devices": [
     {
       "device_id": "anc_00",
       "ble_name": "WiLoc_anc_00",
       "base_mac": "3c:dc:75:99:07:f0",
-      "status": "needs reflash (was built with IDF v5.4)"
+      "status": "flashed and verified"
     },
     {
       "device_id": "anc_01",
       "ble_name": "WiLoc_anc_01",
       "base_mac": "3c:dc:75:9b:d2:88",
-      "status": "needs reflash (was built with IDF v5.4)"
+      "status": "flashed and verified"
     },
     {
       "device_id": "anc_02",
       "ble_name": "WiLoc_anc_02",
       "base_mac": "3c:dc:75:9d:4e:3c",
-      "status": "needs reflash (was built with IDF v5.4)"
+      "status": "flashed and verified"
     },
     {
       "device_id": "anc_03",
       "ble_name": "WiLoc_anc_03",
       "base_mac": "3c:dc:75:9d:4e:68",
-      "status": "needs reflash with new ID"
+      "status": "flashed and verified"
     }
   ]
 }

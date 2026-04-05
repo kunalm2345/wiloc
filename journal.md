@@ -111,4 +111,26 @@ Switched from ESP-IDF v5.4 tag to master (HEAD):
 Also added CMake flag for device ID: `idf.py build -DWILOC_DEVICE_ID=anchor_03`
 (the old sdkconfig.defaults approach didn't work because it's a C #define not a Kconfig)
 
-### Status: anchor_03 working, need to reflash anchor_00/01/02 with IDF master
+### 19:00 — ID truncation fix
+
+Device IDs `anchor_00`..`anchor_03` (9 chars) truncated to `anchor_0` in the
+8-byte protocol field — all 4 devices looked identical. Shortened to `anc_00`..`anc_03`
+(6 chars). Also added CMake `-DWILOC_DEVICE_ID=anc_XX` flag for per-device builds.
+
+### 19:15 — All 4 anchors reflashed and verified
+
+All built with ESP-IDF master + correct short IDs. Verified via serial + BLE:
+
+| ID     | MAC                 | BLE Name       | Status |
+|--------|---------------------|----------------|--------|
+| anc_00 | 3c:dc:75:99:07:f0   | WiLoc_anc_00   | OK     |
+| anc_01 | 3c:dc:75:9b:d2:88   | WiLoc_anc_01   | OK     |
+| anc_02 | 3c:dc:75:9d:4e:3c   | WiLoc_anc_02   | OK     |
+| anc_03 | 3c:dc:75:9d:4e:68   | WiLoc_anc_03   | OK     |
+
+BLE CSI streaming confirmed: 18.5 packets/sec, 53 subcarriers, zero parse errors.
+
+### Key learnings
+- ESP32-C5 rev 1.0 requires ESP-IDF master (v5.4 only supports rev 0.x)
+- NimBLE on IDF master advertises as "nimble" not the custom name — match by service UUID
+- Protocol 8-byte ID field means device names must be <= 7 chars (+ null)
