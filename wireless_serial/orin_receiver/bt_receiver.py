@@ -68,20 +68,21 @@ async def discover_devices(scan_time: float = 8.0) -> list[dict]:
     """Scan for WiLoc ESP32 devices via BLE."""
     print(f"Scanning for BLE devices ({scan_time}s)...")
 
-    devices = await BleakScanner.discover(timeout=scan_time)
+    discovered = await BleakScanner.discover(timeout=scan_time, return_adv=True)
 
     wiloc_devices = []
-    for d in devices:
+    for addr, (d, adv) in discovered.items():
         name = d.name or ""
         if name.startswith(WILOC_PREFIX):
             anchor_id = name.replace(WILOC_PREFIX, "")
+            rssi = adv.rssi if adv else None
             wiloc_devices.append({
                 "address": d.address,
                 "name": name,
                 "anchor_id": anchor_id,
-                "rssi": d.rssi,
+                "rssi": rssi,
             })
-            print(f"  Found: {name} ({d.address}) RSSI={d.rssi}dBm")
+            print(f"  Found: {name} ({d.address}) RSSI={rssi}dBm")
 
     if not wiloc_devices:
         print("  No WiLoc devices found. Check ESP32s are powered and flashed.")

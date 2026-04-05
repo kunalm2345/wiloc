@@ -87,3 +87,28 @@ Both running: WiFi promiscuous mode (ch6, CSI capture) + BLE GATT server
 - Device names: `WiLoc_anchor_00`, `WiLoc_anchor_01`
 
 **Next**: Unplug USB, power from USB adapter, verify BLE shows up from Mac/Orin
+
+### 18:30 — Boot failure diagnosis
+
+All 4 boards boot-looped after flashing with ESP-IDF v5.4:
+```
+E (74) boot_comm: Image requires chip rev <= v0.99, but chip is v1.0
+```
+- `--force` in esptool bypassed the flash-time check, but the bootloader itself
+  still rejected the app at runtime
+- Patching `ESP32C5_REV_MAX_FULL` from 99→199 in Kconfig fixed the bootloader check
+- But the firmware STILL crashed (WDT reset after coexist init) — the NimBLE/WiFi
+  stack in v5.4 doesn't properly support C5 rev 1.0
+
+### 18:45 — Fixed: ESP-IDF master branch
+
+Switched from ESP-IDF v5.4 tag to master (HEAD):
+- Master branch has native C5 rev 1.0 support (`ESP32C5_REV_MIN_100`)
+- Build + flash succeeded
+- Serial output shows: WiFi promiscuous CSI enabled, BLE advertising, no crashes
+- BLE scan from Mac confirms: `WiLoc_anchor_03` visible at RSSI -43dBm
+
+Also added CMake flag for device ID: `idf.py build -DWILOC_DEVICE_ID=anchor_03`
+(the old sdkconfig.defaults approach didn't work because it's a C #define not a Kconfig)
+
+### Status: anchor_03 working, need to reflash anchor_00/01/02 with IDF master
