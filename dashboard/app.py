@@ -40,7 +40,8 @@ DEFAULT_ANCHORS = {
 }
 
 WINDOW_SIZE = 100
-UPDATE_INTERVAL_MS = 2000
+UPDATE_INTERVAL_MS = 1000
+LIVENESS_WINDOW_SEC = 5.0
 
 
 def load_settings() -> dict:
@@ -554,7 +555,7 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
 
         stats = store.get_stats(target_mac)
         recent = store.get_recent(WINDOW_SIZE, target_mac)
-        liveness = store.get_anchor_liveness(target_mac, window_sec=float(UPDATE_INTERVAL_MS) / 1000)
+        liveness = store.get_anchor_liveness(target_mac, window_sec=LIVENESS_WINDOW_SEC)
 
         data_by_anchor = {}
         for aid in cur_anchors:
@@ -571,7 +572,7 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
         if stats['total'] == 0:
             status = "Waiting for CSI data..."
 
-        stale_threshold = UPDATE_INTERVAL_MS / 1000 * 2  # 2x interval = stale
+        stale_threshold = LIVENESS_WINDOW_SEC * 2  # 2x liveness window = stale
 
         # Anchor status cards with accurate liveness
         cards = []

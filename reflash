@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Usage: ./reflash anc_00          # verify MAC from setup.json, then flash
+#        ./reflash anc_02 -f       # skip MAC verification, just flash
+#        ./reflash anc_03 -p /dev/tty.usbmodem1101   # specify port
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+FW_DIR="$SCRIPT_DIR/wireless_serial/esp32_bt_serial"
+SETUP_JSON="$SCRIPT_DIR/setup/2026-04-06/setup.json"
+IDF_DIR="$HOME/esp-idf"
+
+# ── Parse args ──
+DEVICE_ID=""
+PORT=""
+FORCE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -f|--force) FORCE=true; shift ;;
+        -p|--port)  PORT="$2"; shift 2 ;;
+        -*)         echo "Unknown flag: $1"; exit 1 ;;
+        *)          DEVICE_ID="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$DEVICE_ID" ]]; then
+    echo "Usage: ./reflash <device_id> [-f] [-p /dev/tty.usbmodemXXX]"
+    echo ""
+    echo "Known devices:"
+    python3 -c "
+import json
+with open('$SETUP_JSON') as f:
+    for d in json.load(f)['devices']:
+        print(f\"  {d['device_id']}  MAC={d['base_mac']}  {d.get('status','')}\")
+"
+    exit 1
+fi
+
+# ── Source ESP-IDF ──
+if [[ ! -f "$IDF_DIR/export.sh" ]]; then
+    echo "ERROR: ESP-IDF not found at $IDF_DIR"
+    exit 1
+fi
+source "$IDF_DIR/export.sh" 2>/dev/null
+
+# ── Find USB port ──
+if [[ -z "$PORT" ]]; then
+    PORTS=($(ls /dev/tty.usbmodem* 2>/dev/null || true))
+    if [[ ${#PORTS[@]} -eq 0 ]]; then
+        echo "ERROR: No ESP32 connected via USB"
+        exit 1
+    elif [[ ${#PORTS[@]} -eq 1 ]]; then
+        PORT="${PORTS[0]}"
+    else
+        echo "Multiple USB devices found:"
+        for p in "${PORTS[@]}"; do echo "  $p"; done
+        echo "Specify one with: ./reflash $DEVICE_ID -p <port>"
+        exit 1
+    fi
+fi
+echo "Port: $PORT"
+
+# ── Verify MAC ──
+if [[ "$FORCE" == false ]]; then
+    EXPECTED_MAC=$(python3 -c "
+import json, sys
+with open('$SETUP_JSON') as f:
+    devs = {d['device_id']: d['base_mac'] for d in json.load(f)['devices']}
+mac = devs.get('$DEVICE_ID')
+if not mac:
+    print('UNKNOWN', file=sys.stderr)
+    sys.exit(1)
+print(mac)
+" 2>&1) || { echo "ERROR: '$DEVICE_ID' not found in setup.json"; exit 1; }
+
+    echo "Expected MAC for $DEVICE_ID: $EXPECTED_MAC"
+    echo "Reading chip MAC..."
+
+    ACTUAL_MAC=$(python3 -m esptool --port "$PORT" chip_id 2>&1 | grep "BASE MAC" | head -1 | awk '{print $NF}')
+    if [[ -z "$ACTUAL_MAC" ]]; then
+        ACTUAL_MAC=$(python3 -m esptool --port "$PORT" chip-id 2>&1 | grep "BASE MAC" | head -1 | awk '{print $NF}')
+    fi
+    echo "Actual MAC on $PORT: $ACTUAL_MAC"
+
+    if [[ "$ACTUAL_MAC" != "$EXPECTED_MAC" ]]; then
+        echo ""
+        echo "ERROR: MAC mismatch!"
+        echo "  Expected: $EXPECTED_MAC ($DEVICE_ID)"
+        echo "  Got:      $ACTUAL_MAC"
+        echo ""
+        echo "Wrong board? Use -f to bypass, or check setup.json"
+        exit 1
+    fi
+    echo "MAC verified OK"
+else
+    echo "Skipping MAC verification (-f)"
+fi
+
+# ── Build ──
+echo ""
+echo "Building firmware for $DEVICE_ID..."
+cd "$FW_DIR"
+
+idf.py fullclean > /dev/null 2>&1 || true
+idf.py set-target esp32c5 > /dev/null 2>&1
+idf.py build -DWILOC_DEVICE_ID="$DEVICE_ID" 2>&1 | tail -5
+
+# ── Flash ──
+echo ""
+echo "Flashing $DEVICE_ID to $PORT..."
+python3 -m esptool --chip esp32c5 -p "$PORT" -b 460800 \
+    --before default_reset --after hard_reset \
+    write_flash --flash_mode dio --flash_size 2MB --flash_freq 80m \
+    0x2000 build/bootloader/bootloader.bin \
+    0x8000 build/partition_table/partition-table.bin \
+    0x10000 build/wiloc_anchor.bin 2>&1 | tail -5
+
+echo ""
+echo "Done! $DEVICE_ID flashed on $PORT"
+echo "Unplug and power cycle the board."
