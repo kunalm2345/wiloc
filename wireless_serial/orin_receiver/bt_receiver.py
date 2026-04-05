@@ -1,8 +1,10 @@
 """
-Bluetooth SPP Receiver — runs on Orin Nano, connects to all ESP32 anchors.
+BLE GATT Receiver — runs on Orin Nano (or Mac/any machine with BLE).
 
-Discovers WiLoc ESP32 anchors via Bluetooth, connects over SPP,
-receives CSI/RSSI frames, and stores to SQLite.
+Discovers WiLoc ESP32-C5 anchors via BLE, connects to their GATT service,
+subscribes to TX notifications (CSI data), writes commands to RX characteristic.
+
+Uses `bleak` — cross-platform BLE library (pip install bleak).
 
 Usage:
     python bt_receiver.py --discover              # scan for WiLoc devices
@@ -11,14 +13,15 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
-import socket
 import sqlite3
-import struct
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+
+from bleak import BleakClient, BleakScanner
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -28,10 +31,11 @@ from protocol import (
     encode_frame,
 )
 
-# Bluetooth SPP UUID
-SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb"
+# BLE UUIDs (must match firmware)
+WILOC_SVC_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
+WILOC_TX_UUID  = "0000ffe1-0000-1000-8000-00805f9b34fb"  # notify
+WILOC_RX_UUID  = "0000ffe2-0000-1000-8000-00805f9b34fb"  # write
 
-# WiLoc device name prefix
 WILOC_PREFIX = "WiLoc_"
 
 
@@ -60,144 +64,68 @@ def init_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def discover_devices() -> list[dict]:
-    """Scan for WiLoc ESP32 devices using classic BT discovery."""
-    import bluetooth
+async def discover_devices(scan_time: float = 8.0) -> list[dict]:
+    """Scan for WiLoc ESP32 devices via BLE."""
+    print(f"Scanning for BLE devices ({scan_time}s)...")
 
-    print("Scanning for Bluetooth devices (10s)...")
-    nearby = bluetooth.discover_devices(duration=10, lookup_names=True,
-                                         lookup_class=True, flush_cache=True)
+    devices = await BleakScanner.discover(timeout=scan_time)
 
     wiloc_devices = []
-    for addr, name, dev_class in nearby:
-        if name and name.startswith(WILOC_PREFIX):
+    for d in devices:
+        name = d.name or ""
+        if name.startswith(WILOC_PREFIX):
             anchor_id = name.replace(WILOC_PREFIX, "")
             wiloc_devices.append({
-                "address": addr,
+                "address": d.address,
                 "name": name,
                 "anchor_id": anchor_id,
-                "class": dev_class,
+                "rssi": d.rssi,
             })
-            print(f"  Found: {name} ({addr}) — anchor_id={anchor_id}")
+            print(f"  Found: {name} ({d.address}) RSSI={d.rssi}dBm")
 
     if not wiloc_devices:
-        print("  No WiLoc devices found. Make sure ESP32s are powered and flashed.")
+        print("  No WiLoc devices found. Check ESP32s are powered and flashed.")
     else:
         print(f"\nFound {len(wiloc_devices)} WiLoc device(s).")
 
     return wiloc_devices
 
 
-class AnchorConnection(threading.Thread):
-    """Manages a single BT SPP connection to one ESP32 anchor."""
+class AnchorConnection:
+    """Manages a BLE connection to one ESP32 anchor."""
 
     def __init__(self, address: str, name: str, anchor_id: str,
                  db_conn: sqlite3.Connection, db_lock: threading.Lock):
-        super().__init__(daemon=True)
         self.address = address
         self.name = name
         self.anchor_id = anchor_id
         self.db_conn = db_conn
         self.db_lock = db_lock
-        self.sock = None
-        self.running = False
+        self.client: BleakClient | None = None
         self.connected = False
         self.packets_received = 0
-        self.last_heartbeat = 0
+        self.last_heartbeat = 0.0
         self._rx_buf = bytearray()
+        self._commit_counter = 0
 
-    def connect(self) -> bool:
-        """Establish BT SPP connection."""
-        import bluetooth
+    def _notification_handler(self, sender, data: bytearray):
+        """Called when ESP32 sends a BLE notification (CSI/RSSI/heartbeat/etc)."""
+        self._rx_buf.extend(data)
 
-        try:
-            print(f"  [{self.anchor_id}] Connecting to {self.address}...")
+        while True:
+            result = decode_frame(self._rx_buf)
+            if result is None:
+                break
 
-            # Find SPP service
-            services = bluetooth.find_service(uuid=SPP_UUID, address=self.address)
-            if not services:
-                # Fallback: try channel 1 (most SPP servers use channel 1)
-                port = 1
-            else:
-                port = services[0]["port"]
+            ptype, payload, _ = result
+            self.packets_received += 1
+            self._handle_packet(ptype, payload)
 
-            self.sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            self.sock.connect((self.address, port))
-            self.sock.settimeout(2.0)
-            self.connected = True
-            print(f"  [{self.anchor_id}] Connected on RFCOMM channel {port}")
-            return True
-
-        except Exception as e:
-            print(f"  [{self.anchor_id}] Connection failed: {e}")
-            self.connected = False
-            return False
-
-    def disconnect(self):
-        self.running = False
-        self.connected = False
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception:
-                pass
-
-    def send_command(self, ptype: int, payload: bytes = b""):
-        """Send a command frame to this anchor."""
-        if not self.connected or not self.sock:
-            print(f"  [{self.anchor_id}] Not connected, can't send command")
-            return
-        frame = encode_frame(ptype, payload)
-        try:
-            self.sock.send(frame)
-        except Exception as e:
-            print(f"  [{self.anchor_id}] Send failed: {e}")
-
-    def run(self):
-        """Main receive loop."""
-        self.running = True
-        commit_counter = 0
-
-        while self.running:
-            if not self.connected:
-                # Reconnect
-                print(f"  [{self.anchor_id}] Reconnecting in 3s...")
-                time.sleep(3)
-                if not self.connect():
-                    continue
-
-            try:
-                data = self.sock.recv(1024)
-                if not data:
-                    self.connected = False
-                    continue
-                self._rx_buf.extend(data)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                print(f"  [{self.anchor_id}] Recv error: {e}")
-                self.connected = False
-                continue
-
-            # Decode all complete frames
-            while True:
-                result = decode_frame(self._rx_buf)
-                if result is None:
-                    break
-
-                ptype, payload, _ = result
-                self.packets_received += 1
-                self._handle_packet(ptype, payload)
-
-                commit_counter += 1
-                if commit_counter >= 50:
-                    with self.db_lock:
-                        self.db_conn.commit()
-                    commit_counter = 0
-
-        # Final commit
-        with self.db_lock:
-            self.db_conn.commit()
+            self._commit_counter += 1
+            if self._commit_counter >= 50:
+                with self.db_lock:
+                    self.db_conn.commit()
+                self._commit_counter = 0
 
     def _handle_packet(self, ptype: int, payload: bytes):
         now = datetime.utcnow().isoformat()
@@ -235,7 +163,7 @@ class AnchorConnection(threading.Thread):
 
         elif ptype == PacketType.HEARTBEAT:
             try:
-                d = decode_heartbeat_payload(payload)
+                decode_heartbeat_payload(payload)
                 self.last_heartbeat = time.time()
             except Exception:
                 pass
@@ -252,17 +180,60 @@ class AnchorConnection(threading.Thread):
             msg = payload.decode("utf-8", errors="replace")
             print(f"  [{self.anchor_id}] ACK: {msg}")
 
+    async def connect(self) -> bool:
+        """Establish BLE GATT connection."""
+        try:
+            print(f"  [{self.anchor_id}] Connecting to {self.address}...")
+            self.client = BleakClient(self.address)
+            await self.client.connect()
+
+            if not self.client.is_connected:
+                print(f"  [{self.anchor_id}] Connection failed")
+                return False
+
+            mtu = self.client.mtu_size
+            print(f"  [{self.anchor_id}] Connected! MTU={mtu}")
+
+            await self.client.start_notify(WILOC_TX_UUID, self._notification_handler)
+            self.connected = True
+            print(f"  [{self.anchor_id}] Subscribed to notifications")
+            return True
+
+        except Exception as e:
+            print(f"  [{self.anchor_id}] Connection failed: {e}")
+            self.connected = False
+            return False
+
+    async def disconnect(self):
+        self.connected = False
+        if self.client and self.client.is_connected:
+            try:
+                await self.client.stop_notify(WILOC_TX_UUID)
+                await self.client.disconnect()
+            except Exception:
+                pass
+
+    async def send_command(self, ptype: int, payload: bytes = b""):
+        """Send a command frame to this anchor via BLE write."""
+        if not self.connected or not self.client:
+            print(f"  [{self.anchor_id}] Not connected")
+            return
+        frame = encode_frame(ptype, payload)
+        try:
+            await self.client.write_gatt_char(WILOC_RX_UUID, frame, response=False)
+        except Exception as e:
+            print(f"  [{self.anchor_id}] Write failed: {e}")
+
 
 class Receiver:
-    """Manages connections to all ESP32 anchors."""
+    """Manages BLE connections to all ESP32 anchors."""
 
     def __init__(self, db_path: str):
         self.db_conn = init_db(db_path)
         self.db_lock = threading.Lock()
         self.connections: dict[str, AnchorConnection] = {}
 
-    def connect_all(self, devices: list[dict]):
-        """Connect to all discovered devices."""
+    async def connect_all(self, devices: list[dict]):
         for dev in devices:
             conn = AnchorConnection(
                 address=dev["address"],
@@ -271,86 +242,80 @@ class Receiver:
                 db_conn=self.db_conn,
                 db_lock=self.db_lock,
             )
-            if conn.connect():
-                conn.start()
-                self.connections[dev["anchor_id"]] = conn
+            self.connections[dev["anchor_id"]] = conn
+            await conn.connect()
 
-        print(f"\nConnected to {len(self.connections)}/{len(devices)} anchors.")
+        ok = sum(1 for c in self.connections.values() if c.connected)
+        print(f"\nConnected to {ok}/{len(devices)} anchors.")
 
-    def send_command_all(self, ptype: int, payload: bytes = b""):
-        """Send command to all connected anchors."""
-        for aid, conn in self.connections.items():
-            conn.send_command(ptype, payload)
-
-    def send_command(self, anchor_id: str, ptype: int, payload: bytes = b""):
-        """Send command to specific anchor."""
-        if anchor_id in self.connections:
-            self.connections[anchor_id].send_command(ptype, payload)
-        else:
-            print(f"Anchor {anchor_id} not connected")
+    async def send_command_all(self, ptype: int, payload: bytes = b""):
+        for conn in self.connections.values():
+            await conn.send_command(ptype, payload)
 
     def status(self):
-        """Print connection status."""
         print(f"\n{'Anchor':<15} {'Connected':<12} {'Packets':<10} {'Last HB':<15}")
         print("-" * 55)
         for aid, conn in self.connections.items():
             hb_ago = f"{time.time() - conn.last_heartbeat:.0f}s ago" if conn.last_heartbeat else "never"
             print(f"{aid:<15} {str(conn.connected):<12} {conn.packets_received:<10} {hb_ago:<15}")
 
-    def run_interactive(self):
+    async def run_interactive(self):
         """Interactive command loop."""
         print("\nCommands: start | stop | status | channel <N> | quit")
 
+        loop = asyncio.get_event_loop()
+
         while True:
             try:
-                cmd = input("\nwiloc> ").strip().lower()
+                cmd = await loop.run_in_executor(None, lambda: input("\nwiloc> ").strip().lower())
             except (EOFError, KeyboardInterrupt):
                 break
 
-            if cmd == "quit" or cmd == "q":
+            if cmd in ("quit", "q"):
                 break
             elif cmd == "start":
-                self.send_command_all(PacketType.CMD_START)
+                await self.send_command_all(PacketType.CMD_START)
             elif cmd == "stop":
-                self.send_command_all(PacketType.CMD_STOP)
+                await self.send_command_all(PacketType.CMD_STOP)
             elif cmd == "status":
                 self.status()
-                self.send_command_all(PacketType.CMD_GET_STATUS)
+                await self.send_command_all(PacketType.CMD_GET_STATUS)
             elif cmd.startswith("channel "):
                 try:
                     ch = int(cmd.split()[1])
-                    self.send_command_all(PacketType.CMD_SET_CHANNEL, bytes([ch]))
+                    await self.send_command_all(PacketType.CMD_SET_CHANNEL, bytes([ch]))
                 except (ValueError, IndexError):
                     print("Usage: channel <1-13>")
             else:
                 print("Unknown command. Try: start, stop, status, channel <N>, quit")
 
-        # Cleanup
         for conn in self.connections.values():
-            conn.disconnect()
+            await conn.disconnect()
+        with self.db_lock:
+            self.db_conn.commit()
         self.db_conn.close()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="WiLoc Bluetooth Receiver")
-    parser.add_argument("--discover", action="store_true", help="Scan for WiLoc devices")
-    parser.add_argument("--connect-all", action="store_true", help="Connect to all found devices")
-    parser.add_argument("--db", default="wiloc_bt.db", help="SQLite database path")
+async def main_async():
+    parser = argparse.ArgumentParser(description="WiLoc BLE Receiver")
+    parser.add_argument("--discover", action="store_true")
+    parser.add_argument("--connect-all", action="store_true")
+    parser.add_argument("--db", default="wiloc_ble.db")
+    parser.add_argument("--scan-time", type=float, default=8.0)
     args = parser.parse_args()
 
     if args.discover and not args.connect_all:
-        discover_devices()
+        await discover_devices(args.scan_time)
         return
 
     if args.connect_all:
-        devices = discover_devices()
+        devices = await discover_devices(args.scan_time)
         if not devices:
             return
-
         receiver = Receiver(args.db)
-        receiver.connect_all(devices)
-        receiver.run_interactive()
+        await receiver.connect_all(devices)
+        await receiver.run_interactive()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
