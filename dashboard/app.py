@@ -137,7 +137,9 @@ class CSIStore:
     def get_anchor_liveness(self, target_mac: str = None, window_sec: float = 5.0) -> dict:
         """Per-anchor: pkt/sec over window + seconds since last packet."""
         conn = sqlite3.connect(self.db_path)
-        cutoff_iso = (datetime.now() - __import__('datetime').timedelta(seconds=window_sec)).isoformat()
+        from datetime import timedelta, timezone
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC to match DB
+        cutoff_iso = (now_utc - timedelta(seconds=window_sec)).isoformat()
         if target_mac:
             rows = conn.execute(
                 """SELECT anchor_id, COUNT(*), MAX(collected_at)
@@ -158,13 +160,12 @@ class CSIStore:
                 "SELECT anchor_id, MAX(collected_at) FROM csi_readings GROUP BY anchor_id").fetchall()
         conn.close()
 
-        now = datetime.now()
         result = {}
         # Fill in last_seen for all known anchors
         for aid, last_at in all_last:
             try:
                 last_dt = datetime.fromisoformat(last_at)
-                age = (now - last_dt).total_seconds()
+                age = (now_utc - last_dt).total_seconds()
             except Exception:
                 age = 9999.0
             result[aid] = {"rate": 0.0, "age_sec": age}
@@ -173,7 +174,7 @@ class CSIStore:
             result[aid]["rate"] = round(count / window_sec, 1)
             try:
                 last_dt = datetime.fromisoformat(last_at)
-                result[aid]["age_sec"] = (now - last_dt).total_seconds()
+                result[aid]["age_sec"] = (now_utc - last_dt).total_seconds()
             except Exception:
                 pass
         return result

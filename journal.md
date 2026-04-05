@@ -134,3 +134,22 @@ BLE CSI streaming confirmed: 18.5 packets/sec, 53 subcarriers, zero parse errors
 - ESP32-C5 rev 1.0 requires ESP-IDF master (v5.4 only supports rev 0.x)
 - NimBLE on IDF master advertises as "nimble" not the custom name — match by service UUID
 - Protocol 8-byte ID field means device names must be <= 7 chars (+ null)
+
+### ~03:30 IST — Timezone mismatch discovered
+
+Dashboard showed "stale (22000s ago)" for data that was actually ~45 min old.
+- Root cause: old receiver wrote timestamps with `datetime.utcnow()` (UTC)
+- Dashboard compared with `datetime.now()` (IST = UTC+5:30)
+- 5.5h offset made everything look 6 hours stale
+- Fix: dashboard liveness now uses UTC consistently for age comparison
+- All 159K packets were from a single 18-min session (21:15-21:33 UTC = 02:45-03:03 IST)
+
+### ~03:45 IST — CSI not flowing in new sessions
+
+Receiver connects to all 4 anchors via BLE. But only HEARTBEAT packets (type 0x05)
+arrive — zero CSI_DATA packets (type 0x01).
+
+ESP32 serial log shows `GATT notify` at ~20/sec — the firmware IS sending data.
+But receiver only parses heartbeats. Likely cause: CSI packets are arriving as
+BLE notifications but the frame parser isn't reassembling them, or they're a
+different packet format than expected. Need more verbose debug logging to confirm.

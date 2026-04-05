@@ -129,23 +129,31 @@ class AnchorConnection:
         self._rx_buf.extend(data)
         self._notify_count = getattr(self, '_notify_count', 0) + 1
 
-        # Debug: log first few notifications per anchor
-        if self._notify_count <= 3:
-            print(f"  [{self.anchor_id}] notify #{self._notify_count}: {len(data)} bytes, "
-                  f"buf={len(self._rx_buf)}, first4={data[:4].hex()}")
+        # Debug: log first 20 notifications to diagnose packet types
+        if self._notify_count <= 20:
+            print(f"  [{self.anchor_id}] notify #{self._notify_count}: {len(data)}B, "
+                  f"buf={len(self._rx_buf)}, hex={data[:8].hex()}")
 
         while True:
             result = decode_frame(self._rx_buf)
             if result is None:
+                # If buffer is growing but no frames parse, log it
+                if self._notify_count <= 20 and len(self._rx_buf) > 200:
+                    print(f"  [{self.anchor_id}] WARNING: buf={len(self._rx_buf)} but no frame parsed. "
+                          f"first8={self._rx_buf[:8].hex()}")
                 break
 
             ptype, payload, _ = result
             self.packets_received += 1
             self._handle_packet(ptype, payload)
-            # Log first successful parse
-            if self.packets_received <= 2:
-                print(f"  [{self.anchor_id}] parsed pkt #{self.packets_received}: "
-                      f"type=0x{ptype:02x} len={len(payload)}")
+            # Log first 10 successful parses with type breakdown
+            if self.packets_received <= 10:
+                try:
+                    name = PacketType(ptype).name
+                except ValueError:
+                    name = f"0x{ptype:02x}"
+                print(f"  [{self.anchor_id}] pkt #{self.packets_received}: "
+                      f"{name} len={len(payload)}")
 
             self._commit_counter += 1
             if self._commit_counter >= 50:
@@ -154,7 +162,7 @@ class AnchorConnection:
                 self._commit_counter = 0
 
     def _handle_packet(self, ptype: int, payload: bytes):
-        now = datetime.now().isoformat()
+        now = datetime.utcnow().isoformat()
 
         if ptype == PacketType.CSI_DATA:
             try:
