@@ -1,0 +1,27 @@
+# WiLoc ESP32 Anchor — sdkconfig defaults
+# Enables Classic BT SPP + WiFi coexistence + CSI
+
+# Bluetooth
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_SPP_ENABLED=y
+CONFIG_BT_BLE_ENABLED=n
+
+# WiFi
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+
+# Coexistence (WiFi + BT sharing the 2.4GHz radio)
+CONFIG_ESP32_WIFI_SW_COEXIST_ENABLE=y
+CONFIG_SW_COEXIST_PREFERENCE_BALANCE=y
+
+# Performance
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Serial output (for debugging, disable in production)
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# WiLoc device config (override per device during flash)
+CONFIG_WILOC_DEVICE_ID="anchor_00"
+CONFIG_WILOC_WIFI_CHANNEL=6
