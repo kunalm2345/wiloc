@@ -21,6 +21,20 @@
       "base_mac": "3c:dc:75:9b:d2:88",
       "flash_port": "/dev/tty.usbmodem1101",
       "flash_timestamp": "2026-04-06T17:55:00"
+    },
+    {
+      "device_id": "anchor_02",
+      "ble_name": "WiLoc_anchor_02",
+      "base_mac": "3c:dc:75:9d:4e:3c",
+      "flash_port": "/dev/tty.usbmodem101",
+      "flash_timestamp": "2026-04-06T18:15:00"
+    },
+    {
+      "device_id": "anchor_03",
+      "ble_name": "WiLoc_anchor_03",
+      "base_mac": "3c:dc:75:9d:4e:68",
+      "flash_port": "/dev/tty.usbmodem1101",
+      "flash_timestamp": "2026-04-06T18:15:00"
     }
   ]
 }
