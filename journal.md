@@ -153,3 +153,100 @@ ESP32 serial log shows `GATT notify` at ~20/sec — the firmware IS sending data
 But receiver only parses heartbeats. Likely cause: CSI packets are arriving as
 BLE notifications but the frame parser isn't reassembling them, or they're a
 different packet format than expected. Need more verbose debug logging to confirm.
+
+## 2026-04-07
+
+### ~04:30 IST — 5th ESP32 configured as localization target
+
+New ESP32-C5 (MAC `d0:cf:13:e0:00:c4`) set up as the target to be localized.
+
+**Design**: WiFi SoftAP mode broadcasting beacons on channel 6.
+- SSID: `WiLoc_Target`
+- AP MAC: `d0:cf:13:e0:00:c5` (AP MAC is base_mac + 1 on ESP32)
+- Beacon interval: 100ms (10 beacons/sec)
+- TX power: 20 dBm (maximum)
+- BLE GATT: `WiLoc_tgt` for debug/control (start/stop/channel/status)
+
+**How it works**: The target does NOT connect to the anchors. It IS a hotspot.
+The 4 anchors are in promiscuous mode on channel 6 — they sniff ALL WiFi frames
+on that channel and extract CSI. The target's beacons are just more WiFi frames
+for the anchors to capture. Filter by AP MAC `d0:cf:13:e0:00:c5` on the
+dashboard to see only the target's data.
+
+**Dashboard target healthcheck added**: Shows whether the target is being seen
+by the anchors — LIVE (3+ anchors, good rate), PARTIAL, STALE, or NOT SEEN.
+Includes per-anchor rate breakdown and total packet count.
+
+### ~04:45 IST — DB locking + path issues fixed
+
+**Problem 1**: `sqlite3.OperationalError: database is locked` — receiver and dashboard
+both writing/reading the same DB without WAL mode.
+- Fix: `PRAGMA journal_mode=WAL` + `PRAGMA busy_timeout=5000` on all connections
+- Also wrapped commit in try/except in BLE callback so locked DB doesn't crash receiver
+
+**Problem 2**: "Empty DB" — dashboard and receiver used relative `wiloc_ble.db` path,
+so running from different directories created separate empty DBs.
+- Fix: both now resolve DB path relative to project root via `Path(__file__)`
+- Added Justfile so commands always run from project root:
+  `just dashboard`, `just connect`, `just discover`, `just stats`
+
+### ~05:30 IST — Target ESP32 not visible to anchors
+
+Target SoftAP was broadcasting beacons on ch6 but anchors captured zero CSI from it.
+All router MACs visible, target MAC `d0:cf:13:e0:00:c5` absent.
+
+**Root cause**: ESP32-C5 CSI callback only fires for **data frames** (HT-LTF preamble),
+not **management frames** (beacons/probes). SoftAP beacons are management frames.
+
+**Fix**: Rewrote target to use **ESP-NOW** (sends data frames) instead of SoftAP beacons.
+- ESP-NOW broadcast at 10 packets/sec to `ff:ff:ff:ff:ff:ff`
+- Critical: `esp_now_set_peer_rate_config()` with `WIFI_PHY_RATE_MCS0_LGI` + `WIFI_PHY_MODE_HT20`
+  — this makes ESP-NOW use HT preamble, which anchors' `acquire_csi_ht20=true` captures
+- Without the rate config, ESP-NOW used legacy rate with no HT-LTF → no CSI
+
+**Also fixed anchor CSI config** to match Espressif's esp-csi example for C5:
+- `acquire_csi_legacy=0` (was 1), `acquire_csi_force_lltf=0`
+- `acquire_csi_su/mu/dcm/beamformed=0` (were all 1)
+- `acquire_csi_he_stbc_mode=2`, `val_scale_cfg=0`
+
+Target MAC changed from `d0:cf:13:e0:00:c5` (AP) to `d0:cf:13:e0:00:c4` (STA)
+since target now runs in STA mode with ESP-NOW.
+
+Result: all 4 anchors receiving target CSI at ~10 pkt/s/anchor. RSSI varies
+by anchor (-23 to -52 dBm) reflecting different distances.
+
+### ~06:00 IST — Dashboard rewrite: Dash → FastAPI + HTMX + Chart.js
+
+Old Dash/Plotly dashboard returned valid JSON (confirmed via curl) but frontend
+never rendered it — suspected React/Plotly rendering bug with large 3D scenes.
+
+Rewrote as FastAPI + Jinja2 templates + Chart.js + raw Canvas 2D:
+- `dashboard/server.py` — FastAPI backend with JSON API endpoints
+- `dashboard/templates/index.html` — single-page HTML with HTMX polling
+- Room 2D top-down canvas with anchors, AP position, distance lines
+- RSSI timeline (Chart.js line), CSI waterfall (Canvas 2D heatmap)
+- Target/anchor status cards, position estimate
+- Settings modal: room dimensions + anchor positions, saved to settings.json
+- `just dashboard` / `just flash` commands in Justfile
+
+### ~06:30 IST — Localization approach assessment
+
+RSSI trilateration works but accuracy is poor without tedious calibration
+(path loss exponent, reference distance per room). Evaluated alternatives:
+
+| Approach | How it works | Accuracy | Calibration |
+|---|---|---|---|
+| **RSSI trilateration** (current) | RSSI → distance → least-squares | ~2-5m | heavy |
+| **CSI phase ranging** | phase slope across 53 subcarriers → ToF → distance | 20-50cm | none |
+| **CSI fingerprinting** | collect CSI at grid, match via k-NN/ML | 10-30cm | grid walk |
+| **Deep learning on CSI** | CNN/LSTM on raw CSI → position | 5-20cm | training data |
+
+**AoA not feasible**: ESP32-C5 has single antenna. AoA needs antenna array.
+BLE 5.1 AoA/AoD is supported on C5 but for BLE, not WiFi CSI.
+
+**Decision**: Implement CSI phase ranging first (no calibration, uses existing data),
+then fingerprinting later for better accuracy.
+
+### Key sources
+- [Espressif esp-csi sender/receiver](https://deepwiki.com/espressif/esp-csi/3.1-csi-sender-and-receiver-setup)
+- [ESP-IDF WiFi CSI docs](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c5/api-guides/wifi.html)

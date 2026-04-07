@@ -1,36 +1,50 @@
 {
   "date": "2026-04-06",
   "chip": "ESP32-C5 (revision v1.0)",
-  "firmware": "WiLoc BLE GATT Anchor (NimBLE + WiFi CSI promiscuous)",
   "esp_idf_version": "master (post-v5.4, C5 rev 1.0 support)",
   "wifi_channel": 6,
   "ble_service_uuid": "0000ffe0-0000-1000-8000-00805f9b34fb",
   "ble_tx_char_uuid": "0000ffe1-0000-1000-8000-00805f9b34fb",
   "ble_rx_char_uuid": "0000ffe2-0000-1000-8000-00805f9b34fb",
-  "devices": [
+  "anchors": [
     {
       "device_id": "anc_00",
       "ble_name": "WiLoc_anc_00",
       "base_mac": "3c:dc:75:99:07:f0",
+      "firmware": "anchor (WiFi CSI promiscuous + BLE GATT)",
       "status": "flashed and verified"
     },
     {
       "device_id": "anc_01",
       "ble_name": "WiLoc_anc_01",
       "base_mac": "3c:dc:75:9b:d2:88",
+      "firmware": "anchor (WiFi CSI promiscuous + BLE GATT)",
       "status": "flashed and verified"
     },
     {
       "device_id": "anc_02",
       "ble_name": "WiLoc_anc_02",
       "base_mac": "3c:dc:75:9d:4e:3c",
+      "firmware": "anchor (WiFi CSI promiscuous + BLE GATT)",
       "status": "flashed and verified"
     },
     {
       "device_id": "anc_03",
       "ble_name": "WiLoc_anc_03",
       "base_mac": "3c:dc:75:9d:4e:68",
+      "firmware": "anchor (WiFi CSI promiscuous + BLE GATT)",
       "status": "flashed and verified"
     }
-  ]
+  ],
+  "target": {
+    "device_id": "tgt",
+    "ble_name": "WiLoc_tgt",
+    "base_mac": "d0:cf:13:e0:00:c4",
+    "ap_mac": "d0:cf:13:e0:00:c5",
+    "softap_ssid": "WiLoc_Target",
+    "beacon_interval_ms": 100,
+    "tx_power_dbm": 20,
+    "firmware": "target (SoftAP beacon broadcaster + BLE GATT)",
+    "status": "flashed and verified"
+  }
 }

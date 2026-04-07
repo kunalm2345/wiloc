@@ -40,7 +40,9 @@ WILOC_PREFIX = "WiLoc_"
 
 
 def init_db(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS csi_readings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,8 +159,11 @@ class AnchorConnection:
 
             self._commit_counter += 1
             if self._commit_counter >= 50:
-                with self.db_lock:
-                    self.db_conn.commit()
+                try:
+                    with self.db_lock:
+                        self.db_conn.commit()
+                except sqlite3.OperationalError:
+                    pass  # DB locked by dashboard — will retry next batch
                 self._commit_counter = 0
 
     def _handle_packet(self, ptype: int, payload: bytes):
@@ -334,7 +339,8 @@ async def main_async():
     parser = argparse.ArgumentParser(description="WiLoc BLE Receiver")
     parser.add_argument("--discover", action="store_true")
     parser.add_argument("--connect-all", action="store_true")
-    parser.add_argument("--db", default="wiloc_ble.db")
+    _project_root = Path(__file__).parent.parent.parent
+    parser.add_argument("--db", default=str(_project_root / "wiloc_ble.db"))
     parser.add_argument("--scan-time", type=float, default=8.0)
     args = parser.parse_args()
 

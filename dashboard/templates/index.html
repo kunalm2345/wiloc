@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WiLoc Dashboard</title>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: #0f1117; color: #e0e0e0; }
+        .header { padding: 10px 20px; border-bottom: 1px solid #2a2d35; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 18px; color: #fff; }
+        .header-right { display: flex; align-items: center; gap: 16px; }
+        .header .time { color: #888; font-size: 13px; font-family: monospace; }
+        .header .settings-btn { background: #1e2028; color: #7dd3fc; border: 1px solid #3a5a6a; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .header .settings-btn:hover { background: #2a3a4a; }
+        .controls { padding: 8px 20px; background: #161820; border-bottom: 1px solid #2a2d35; display: flex; align-items: center; gap: 12px; }
+        .controls label { font-size: 13px; color: #aaa; }
+        .controls select { background: #1e2028; color: #e0e0e0; border: 1px solid #3a3d45; padding: 6px 10px; border-radius: 4px; font-family: monospace; font-size: 12px; min-width: 300px; }
+        .grid { display: grid; grid-template-columns: 1fr 300px; gap: 0; min-height: calc(100vh - 90px); }
+        .main { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+        .sidebar { padding: 12px; border-left: 1px solid #2a2d35; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+        .card { background: #161820; border: 1px solid #2a2d35; border-radius: 8px; padding: 12px; }
+        .card h3 { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+        .chart-box { height: 200px; position: relative; }
+        .chart-box canvas { width: 100% !important; height: 100% !important; }
+        .row { display: flex; gap: 12px; }
+        .row > * { flex: 1; }
+
+        /* Room canvas */
+        .room-box { height: 280px; position: relative; background: #0a0c10; border-radius: 6px; overflow: hidden; }
+        .room-box canvas { width: 100% !important; height: 100% !important; }
+
+        /* Status */
+        .status-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #1e2028; }
+        .status-row:last-child { border-bottom: none; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .dot.live { background: #4ade80; box-shadow: 0 0 6px #4ade8066; }
+        .dot.partial { background: #facc15; }
+        .dot.stale { background: #f87171; }
+        .dot.dead { background: #555; }
+        .status-label { font-size: 13px; font-weight: 600; flex: 1; }
+        .status-detail { font-size: 11px; color: #888; font-family: monospace; }
+        .target-card { border-color: #2a4a3a; }
+        .target-card.live { border-color: #4ade8044; background: #0f1f15; }
+        .target-card.partial { border-color: #facc1544; background: #1f1d0f; }
+        .target-card.dead { border-color: #f8717144; background: #1f0f0f; }
+        .pos-display { font-family: monospace; font-size: 22px; color: #4ade80; text-align: center; padding: 6px; }
+        .pos-display .label { font-size: 10px; color: #888; text-transform: uppercase; }
+        .pos-detail { font-size: 11px; color: #666; font-family: monospace; }
+        .tabs { display: inline-flex; gap: 4px; }
+        .tab { padding: 3px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; background: #1e2028; color: #888; border: 1px solid #2a2d35; }
+        .tab.active { background: #2a3a4a; color: #7dd3fc; border-color: #3a5a6a; }
+
+        /* Settings modal */
+        .modal-overlay { display: none; position: fixed; inset: 0; background: #000a; z-index: 100; justify-content: center; align-items: center; }
+        .modal-overlay.open { display: flex; }
+        .modal { background: #161820; border: 1px solid #2a2d35; border-radius: 12px; padding: 24px; width: 500px; max-height: 80vh; overflow-y: auto; }
+        .modal h2 { font-size: 16px; margin-bottom: 16px; }
+        .modal label { font-size: 12px; color: #aaa; display: block; margin-top: 10px; }
+        .modal input { background: #1e2028; color: #e0e0e0; border: 1px solid #3a3d45; padding: 6px 10px; border-radius: 4px; font-family: monospace; font-size: 13px; width: 80px; margin: 4px 4px 4px 0; }
+        .modal .row-inputs { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+        .modal .row-inputs span { font-size: 12px; color: #666; width: 60px; }
+        .modal .btn { padding: 8px 20px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; margin-top: 16px; }
+        .modal .btn-save { background: #4ade80; color: #000; font-weight: 600; }
+        .modal .btn-cancel { background: #2a2d35; color: #aaa; margin-left: 8px; }
+        .modal .saved-msg { color: #4ade80; font-size: 12px; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>WiLoc</h1>
+        <div class="header-right">
+            <span class="time" id="clock">--:--:--</span>
+            <span style="color:#555; font-size:12px;" id="pkt-count">—</span>
+            <button class="settings-btn" onclick="openSettings()">Settings</button>
+        </div>
+    </div>
+    <div class="controls">
+        <label>Target:</label>
+        <select id="mac-select" onchange="selectedMac=this.value; updateAll();">
+            <option value="{{target_mac}}" selected>Target ({{target_mac}})</option>
+            <option value="__all__">All MACs</option>
+            {% for m in macs %}
+            <option value="{{m.target_mac}}">{{m.target_mac}} ({{m.avg_rssi}}dBm, {{m.cnt}}pkts)</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="grid">
+        <div class="main">
+            <div class="card">
+                <h3>Room View — 2D Top-Down</h3>
+                <div class="room-box"><canvas id="roomCanvas"></canvas></div>
+            </div>
+            <div class="row">
+                <div class="card">
+                    <h3>RSSI Timeline</h3>
+                    <div class="chart-box"><canvas id="rssiChart"></canvas></div>
+                </div>
+                <div class="card">
+                    <h3>
+                        CSI Amplitude —
+                        <span class="tabs" id="csi-tabs">
+                            <span class="tab active" data-anchor="anc_00" onclick="selectCsiAnchor(this)">00</span>
+                            <span class="tab" data-anchor="anc_01" onclick="selectCsiAnchor(this)">01</span>
+                            <span class="tab" data-anchor="anc_02" onclick="selectCsiAnchor(this)">02</span>
+                            <span class="tab" data-anchor="anc_03" onclick="selectCsiAnchor(this)">03</span>
+                        </span>
+                    </h3>
+                    <div class="chart-box"><canvas id="csiCanvas"></canvas></div>
+                </div>
+            </div>
+        </div>
+        <div class="sidebar">
+            <div class="card target-card" id="target-card">
+                <h3>Target</h3>
+                <div id="target-status">Loading...</div>
+            </div>
+            <div class="card">
+                <h3>Anchors</h3>
+                <div id="anchor-status">Loading...</div>
+            </div>
+            <div class="card">
+                <h3>Estimated Position</h3>
+                <div id="position">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settings-modal">
+        <div class="modal">
+            <h2>Room & Anchor Settings</h2>
+            <label>Room Dimensions (meters)</label>
+            <div class="row-inputs">
+                <span>Width</span><input type="number" id="s-room-w" step="0.1">
+                <span>Depth</span><input type="number" id="s-room-d" step="0.1">
+                <span>Height</span><input type="number" id="s-room-h" step="0.1">
+            </div>
+            <label>Anchor Positions (meters from room origin corner)</label>
+            <div id="anchor-inputs"></div>
+            <div>
+                <button class="btn btn-save" onclick="saveSettings()">Save</button>
+                <button class="btn btn-cancel" onclick="closeSettings()">Cancel</button>
+            </div>
+            <div class="saved-msg" id="save-msg"></div>
+        </div>
+    </div>
+
+    <script>
+    let selectedMac = "{{target_mac}}";
+    let selectedCsiAnchor = "anc_00";
+    let rssiChart = null;
+    let roomSettings = null;
+
+    const COLORS = {
+        anc_00: '#f87171', anc_01: '#60a5fa',
+        anc_02: '#4ade80', anc_03: '#c084fc'
+    };
+    const ANCHOR_IDS = ['anc_00', 'anc_01', 'anc_02', 'anc_03'];
+
+    // ── Load settings ──
+    async function loadSettings() {
+        const res = await fetch('/api/settings');
+        roomSettings = await res.json();
+        return roomSettings;
+    }
+
+    // ── Room 2D canvas ──
+    function drawRoom(pos) {
+        const canvas = document.getElementById('roomCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = canvas.parentElement.clientWidth;
+        canvas.height = canvas.parentElement.clientHeight;
+        const W = canvas.width, H = canvas.height;
+
+        if (!roomSettings) return;
+        const room = roomSettings.room;
+        const anchors = roomSettings.anchors;
+
+        // Scale: fit room into canvas with padding
+        const pad = 40;
+        const sx = (W - 2*pad) / room.width;
+        const sy = (H - 2*pad) / room.depth;
+        const scale = Math.min(sx, sy);
+        const ox = pad + (W - 2*pad - room.width*scale) / 2;
+        const oy = pad + (H - 2*pad - room.depth*scale) / 2;
+
+        function tx(x) { return ox + x * scale; }
+        function ty(y) { return oy + (room.depth - y) * scale; } // flip y
+
+        // Background
+        ctx.fillStyle = '#0a0c10';
+        ctx.fillRect(0, 0, W, H);
+
+        // Grid
+        ctx.strokeStyle = '#1a1d25';
+        ctx.lineWidth = 0.5;
+        for (let x = 0; x <= room.width; x += 0.5) {
+            ctx.beginPath(); ctx.moveTo(tx(x), ty(0)); ctx.lineTo(tx(x), ty(room.depth)); ctx.stroke();
+        }
+        for (let y = 0; y <= room.depth; y += 0.5) {
+            ctx.beginPath(); ctx.moveTo(tx(0), ty(y)); ctx.lineTo(tx(room.width), ty(y)); ctx.stroke();
+        }
+
+        // Room outline
+        ctx.strokeStyle = '#3a3d45';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(tx(0), ty(room.depth), room.width*scale, room.depth*scale);
+
+        // Dimension labels
+        ctx.fillStyle = '#555';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${room.width}m`, tx(room.width/2), ty(-0.15));
+        ctx.save();
+        ctx.translate(tx(-0.2), ty(room.depth/2));
+        ctx.rotate(-Math.PI/2);
+        ctx.fillText(`${room.depth}m`, 0, 0);
+        ctx.restore();
+
+        // Anchors
+        for (const [aid, a] of Object.entries(anchors)) {
+            const x = tx(a.x), y = ty(a.y);
+            // Diamond marker
+            ctx.fillStyle = COLORS[aid] || '#888';
+            ctx.beginPath();
+            ctx.moveTo(x, y-7); ctx.lineTo(x+5, y); ctx.lineTo(x, y+7); ctx.lineTo(x-5, y);
+            ctx.closePath(); ctx.fill();
+            // Label
+            ctx.fillStyle = '#aaa';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(aid.replace('anc_',''), x, y-10);
+        }
+
+        // AP position estimate
+        if (pos) {
+            const apx = tx(pos.x), apy = ty(pos.y);
+
+            // Lines from AP to anchors
+            for (const [aid, a] of Object.entries(anchors)) {
+                ctx.strokeStyle = COLORS[aid] + '44';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath(); ctx.moveTo(apx, apy); ctx.lineTo(tx(a.x), ty(a.y)); ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // AP dot
+            ctx.fillStyle = '#38bdf8';
+            ctx.beginPath(); ctx.arc(apx, apy, 8, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#0f1117';
+            ctx.beginPath(); ctx.arc(apx, apy, 4, 0, Math.PI*2); ctx.fill();
+
+            // Coordinates
+            ctx.fillStyle = '#38bdf8';
+            ctx.font = 'bold 11px monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(`(${pos.x}, ${pos.y})`, apx+12, apy+4);
+        }
+    }
+
+    // ── RSSI Chart ──
+    function initRssiChart() {
+        const ctx = document.getElementById('rssiChart').getContext('2d');
+        rssiChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels: [], datasets: [] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                animation: false,
+                scales: {
+                    x: { display: false },
+                    y: { title: { display: true, text: 'dBm', color: '#666', font: {size:10} },
+                         grid: { color: '#1a1d25' }, ticks: { color: '#666', font: {size:10} } }
+                },
+                plugins: { legend: { labels: { color: '#888', boxWidth: 10, font: { size: 10 } } } },
+                elements: { point: { radius: 0 }, line: { borderWidth: 1.5 } }
+            }
+        });
+    }
+
+    async function updateRssi() {
+        const res = await fetch(`/api/rssi?mac=${selectedMac}&n=150`);
+        const data = await res.json();
+        const maxLen = Math.max(...Object.values(data).map(v => v.length), 1);
+        rssiChart.data.labels = Array.from({length: maxLen}, (_, i) => i);
+        rssiChart.data.datasets = Object.entries(data).map(([aid, rssis]) => ({
+            label: aid, data: rssis,
+            borderColor: COLORS[aid] || '#888', backgroundColor: 'transparent',
+        }));
+        rssiChart.update();
+    }
+
+    // ── CSI Waterfall ──
+    function drawWaterfall(matrix) {
+        const canvas = document.getElementById('csiCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = canvas.parentElement.clientWidth;
+        canvas.height = canvas.parentElement.clientHeight;
+        if (!matrix || matrix.length === 0) {
+            ctx.fillStyle = '#1e2028'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#555'; ctx.font = '13px monospace'; ctx.fillText('No CSI data', 10, 25);
+            return;
+        }
+        const rows = matrix.length, cols = matrix[0].length;
+        let mn = Infinity, mx = -Infinity;
+        for (const row of matrix) for (const v of row) { if (v < mn) mn = v; if (v > mx) mx = v; }
+        const range = mx - mn || 1;
+        const cw = canvas.width / cols, ch = canvas.height / rows;
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const n = (matrix[r][c] - mn) / range;
+                const R = Math.floor(n < 0.5 ? n*2*100 : 50 + n*205);
+                const G = Math.floor(n * 220);
+                const B = Math.floor(n < 0.5 ? 80 + n*200 : 280 - n*200);
+                ctx.fillStyle = `rgb(${R},${G},${B})`;
+                ctx.fillRect(c*cw, r*ch, cw+1, ch+1);
+            }
+        }
+    }
+
+    async function updateCsi() {
+        const res = await fetch(`/api/csi?anchor=${selectedCsiAnchor}&mac=${selectedMac}&n=40`);
+        const data = await res.json();
+        drawWaterfall(data.matrix);
+    }
+
+    function selectCsiAnchor(el) {
+        document.querySelectorAll('#csi-tabs .tab').forEach(t => t.classList.remove('active'));
+        el.classList.add('active');
+        selectedCsiAnchor = el.dataset.anchor;
+        updateCsi();
+    }
+
+    // ── Status ──
+    async function updateStatus() {
+        const res = await fetch(`/api/status?mac=${selectedMac}`);
+        const d = await res.json();
+
+        document.getElementById('clock').textContent = d.timestamp;
+        document.getElementById('pkt-count').textContent = `${d.total_packets.toLocaleString()} pkts`;
+
+        // Target
+        const tc = document.getElementById('target-card');
+        tc.className = `card target-card ${d.target.status}`;
+        const tgtAnc = Object.entries(d.target.per_anchor)
+            .filter(([_, r]) => r > 0).map(([a, r]) => `${a.replace('anc_','')}: ${r}/s`).join('  ') || 'none';
+        document.getElementById('target-status').innerHTML = `
+            <div class="status-row">
+                <span class="dot ${d.target.status}"></span>
+                <span class="status-label">${d.target.status.toUpperCase()}</span>
+                <span class="status-detail">${d.target.anchors_seeing}/4 anc, ${d.target.total_rate}/s</span>
+            </div>
+            <div class="status-detail" style="padding:2px 0 0 16px">${d.target.mac}</div>
+            <div class="status-detail" style="padding:2px 0 0 16px">${tgtAnc}</div>`;
+
+        // Anchors
+        document.getElementById('anchor-status').innerHTML = Object.entries(d.anchors).sort().map(([aid, v]) => `
+            <div class="status-row">
+                <span class="dot ${v.status}"></span>
+                <span class="status-label" style="color:${COLORS[aid]}">${aid}</span>
+                <span class="status-detail">${v.rate > 0 ? v.rate+'/s' : v.age < 60 ? v.age.toFixed(0)+'s ago' : '—'}</span>
+            </div>`).join('');
+
+        // Position
+        if (d.position) {
+            const rssiHtml = Object.entries(d.position.rssi).sort()
+                .map(([a,r]) => `<div class="pos-detail"><span style="color:${COLORS[a]}">●</span> ${a}: ${r.toFixed(1)} dBm</div>`).join('');
+            document.getElementById('position').innerHTML = `
+                <div style="display:flex;justify-content:center;gap:20px">
+                    <div class="pos-display"><div class="label">X</div>${d.position.x} m</div>
+                    <div class="pos-display"><div class="label">Y</div>${d.position.y} m</div>
+                </div>
+                <div style="margin-top:8px">${rssiHtml}</div>`;
+        } else {
+            document.getElementById('position').innerHTML = '<div class="pos-detail">Need 3+ anchors</div>';
+        }
+
+        // Room
+        drawRoom(d.position);
+    }
+
+    // ── Settings ──
+    async function openSettings() {
+        if (!roomSettings) await loadSettings();
+        const r = roomSettings.room;
+        document.getElementById('s-room-w').value = r.width;
+        document.getElementById('s-room-d').value = r.depth;
+        document.getElementById('s-room-h').value = r.height;
+
+        let html = '';
+        for (const aid of ANCHOR_IDS) {
+            const a = roomSettings.anchors[aid] || {x:0, y:0, z:1.2};
+            html += `<div class="row-inputs">
+                <span style="color:${COLORS[aid]}">${aid}</span>
+                X <input type="number" id="s-${aid}-x" step="0.1" value="${a.x}">
+                Y <input type="number" id="s-${aid}-y" step="0.1" value="${a.y}">
+                Z <input type="number" id="s-${aid}-z" step="0.1" value="${a.z}">
+            </div>`;
+        }
+        document.getElementById('anchor-inputs').innerHTML = html;
+        document.getElementById('save-msg').textContent = '';
+        document.getElementById('settings-modal').classList.add('open');
+    }
+
+    function closeSettings() {
+        document.getElementById('settings-modal').classList.remove('open');
+    }
+
+    async function saveSettings() {
+        const data = {
+            room: {
+                width: parseFloat(document.getElementById('s-room-w').value),
+                depth: parseFloat(document.getElementById('s-room-d').value),
+                height: parseFloat(document.getElementById('s-room-h').value),
+            },
+            anchors: {}
+        };
+        for (const aid of ANCHOR_IDS) {
+            data.anchors[aid] = {
+                x: parseFloat(document.getElementById(`s-${aid}-x`).value),
+                y: parseFloat(document.getElementById(`s-${aid}-y`).value),
+                z: parseFloat(document.getElementById(`s-${aid}-z`).value),
+            };
+        }
+        const res = await fetch('/api/settings', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data),
+        });
+        const result = await res.json();
+        roomSettings = data;
+        document.getElementById('save-msg').textContent = result.message || 'Saved!';
+        drawRoom(null);
+    }
+
+    // ── Polling ──
+    async function updateAll() {
+        try { await Promise.all([updateStatus(), updateRssi(), updateCsi()]); }
+        catch (e) { console.error('Update error:', e); }
+    }
+
+    async function init() {
+        await loadSettings();
+        initRssiChart();
+        await updateAll();
+        setInterval(updateAll, 1500);
+    }
+    init();
+    </script>
+</body>
+</html>

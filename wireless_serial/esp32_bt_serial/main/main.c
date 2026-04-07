@@ -147,7 +147,25 @@ static void queue_frame(uint8_t ptype, const uint8_t *payload, uint16_t plen) {
 }
 
 /* ── CSI callback ── */
+static uint32_t csi_total_count = 0;
+static uint32_t csi_debug_timer = 0;
+
 static void wifi_csi_cb(void *ctx, wifi_csi_info_t *info) {
+    /* Debug: log ALL CSI callbacks regardless of BLE state */
+    csi_total_count++;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (now_ms - csi_debug_timer > 3000) {  /* every 3s */
+        csi_debug_timer = now_ms;
+        if (info && info->mac) {
+            ESP_LOGI(TAG, "CSI debug: %lu total, last_mac=%02x:%02x:%02x:%02x:%02x:%02x len=%d vld=%d",
+                     (unsigned long)csi_total_count,
+                     info->mac[0], info->mac[1], info->mac[2],
+                     info->mac[3], info->mac[4], info->mac[5],
+                     info ? info->len : 0,
+                     info ? info->rx_ctrl.rx_channel_estimate_info_vld : -1);
+        }
+    }
+
     if (!csi_capture_active || !ble_connected || !tx_notifications_enabled) return;
     if (info == NULL || info->buf == NULL) return;
 
@@ -207,19 +225,28 @@ static void wifi_init(void) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    /* Lock to 2.4GHz — our target AP is on 2.4GHz ch6 */
+    ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY));
+
     ESP_ERROR_CHECK(esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
 
-    /* ESP32-C5 WiFi 6 (HE) CSI acquire config */
+    /* ESP32-C5 CSI config — matches Espressif's esp-csi receiver example.
+     * Key: legacy=off, ht20/ht40=on, HE modes=off for ESP-NOW data frames. */
     wifi_csi_config_t csi_cfg = {0};
     csi_cfg.enable = 1;
-    csi_cfg.acquire_csi_legacy = 1;
+    csi_cfg.acquire_csi_legacy = 0;
+    csi_cfg.acquire_csi_force_lltf = 0;
     csi_cfg.acquire_csi_ht20 = 1;
     csi_cfg.acquire_csi_ht40 = 1;
-    csi_cfg.acquire_csi_su = 1;
-    csi_cfg.acquire_csi_mu = 1;
-    csi_cfg.acquire_csi_dcm = 1;
-    csi_cfg.acquire_csi_beamformed = 1;
+    csi_cfg.acquire_csi_vht = 0;
+    csi_cfg.acquire_csi_su = 0;
+    csi_cfg.acquire_csi_mu = 0;
+    csi_cfg.acquire_csi_dcm = 0;
+    csi_cfg.acquire_csi_beamformed = 0;
+    csi_cfg.acquire_csi_he_stbc_mode = 2;
+    csi_cfg.val_scale_cfg = 0;
+    csi_cfg.dump_ack_en = 0;
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_cb, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));

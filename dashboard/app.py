@@ -56,6 +56,55 @@ def save_settings(settings: dict):
         json.dump(settings, f, indent=2)
 
 
+def _oui_lookup(mac: str) -> str:
+    """Identify device type from MAC address prefix (OUI) and flags."""
+    # Locally administered bit (2nd hex char is 2,3,6,7,a,b,e,f) = randomized MAC
+    first_byte = int(mac[:2], 16)
+    if first_byte & 0x02:
+        return "Random MAC (phone/laptop)"
+
+    # Common OUI prefixes (first 3 bytes)
+    oui = mac[:8].lower()
+    oui_db = {
+        "cc:db:93": "Ampak/Realtek (WiFi Router)",
+        "3c:dc:75": "Espressif (ESP32)",
+        "30:ae:a4": "Espressif (ESP32)",
+        "24:6f:28": "Espressif (ESP32)",
+        "a4:cf:12": "Espressif (ESP32)",
+        "ac:67:b2": "Espressif (ESP32)",
+        "7c:df:a1": "Espressif (ESP32)",
+        "88:13:bf": "Espressif (ESP32)",
+        "10:52:1c": "Espressif (ESP32)",
+        "fc:f5:c4": "Espressif (ESP32)",
+        "14:7f:ce": "Liteon (MacBook WiFi)",
+        "f0:18:98": "Apple",
+        "a4:83:e7": "Apple",
+        "ac:de:48": "Apple",
+        "d0:03:4b": "Apple",
+        "38:f9:d3": "Apple",
+        "3c:22:fb": "Apple",
+        "dc:a6:32": "Raspberry Pi",
+        "b8:27:eb": "Raspberry Pi",
+        "e4:5f:01": "Raspberry Pi",
+        "50:6a:03": "Netgear Router",
+        "c0:ff:d4": "Netgear Router",
+        "20:e5:2a": "Netgear Router",
+        "e8:65:d4": "Tenda Router",
+        "c8:3a:35": "Tenda Router",
+        "f4:f2:6d": "TP-Link Router",
+        "50:c7:bf": "TP-Link Router",
+        "ec:08:6b": "TP-Link Router",
+        "e4:c3:2a": "TP-Link Router",
+        "d8:0d:17": "TP-Link Router",
+        "00:1a:2b": "Cisco Router",
+        "00:25:9c": "Cisco Router",
+        "78:da:07": "Samsung",
+        "8c:f5:a3": "Samsung",
+        "bc:d0:74": "Samsung",
+    }
+    return oui_db.get(oui, "")
+
+
 def _load_known_devices() -> dict[str, str]:
     """Load MAC -> friendly name mapping from known_devices.json."""
     if KNOWN_DEVICES_FILE.exists():
@@ -74,7 +123,9 @@ class CSIStore:
         self._ensure_db()
 
     def _ensure_db(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS csi_readings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,7 +141,7 @@ class CSIStore:
         conn.close()
 
     def get_recent(self, n: int = WINDOW_SIZE, target_mac: str = None) -> list[dict]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         if target_mac:
             rows = conn.execute(
@@ -104,7 +155,7 @@ class CSIStore:
 
     def get_recent_by_anchor(self, anchor_id: str, n: int = 50,
                               target_mac: str = None) -> list[dict]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         if target_mac:
             rows = conn.execute(
@@ -118,7 +169,7 @@ class CSIStore:
         return [dict(r) for r in rows]
 
     def get_stats(self, target_mac: str = None) -> dict:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10)
         if target_mac:
             total = conn.execute(
                 "SELECT COUNT(*) FROM csi_readings WHERE target_mac = ?", (target_mac,)).fetchone()[0]
@@ -137,7 +188,7 @@ class CSIStore:
 
     def get_anchor_liveness(self, target_mac: str = None, window_sec: float = 5.0) -> dict:
         """Per-anchor: pkt/sec over window + seconds since last packet."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10)
         from datetime import timedelta, timezone
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC to match DB
         cutoff_iso = (now_utc - timedelta(seconds=window_sec)).isoformat()
@@ -180,14 +231,18 @@ class CSIStore:
                 pass
         return result
 
-    def get_top_macs(self, limit: int = 10) -> list[dict]:
-        conn = sqlite3.connect(self.db_path)
+    def get_top_macs(self, limit: int = 10, window_sec: float = 10.0) -> list[dict]:
+        """Get top MACs using only recent data (last window_sec seconds)."""
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        from datetime import timedelta, timezone
+        cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=window_sec)).isoformat()
         rows = conn.execute("""
             SELECT target_mac, COUNT(*) as cnt, AVG(rssi) as avg_rssi,
                    COUNT(DISTINCT anchor_id) as n_anchors
-            FROM csi_readings GROUP BY target_mac
-            HAVING n_anchors >= 3 ORDER BY avg_rssi DESC LIMIT ?
-        """, (limit,)).fetchall()
+            FROM csi_readings WHERE collected_at > ?
+            GROUP BY target_mac
+            HAVING n_anchors >= 1 ORDER BY avg_rssi DESC LIMIT ?
+        """, (cutoff, limit)).fetchall()
         conn.close()
         return [{"mac": r[0], "count": r[1], "avg_rssi": round(r[2], 1), "n_anchors": r[3]} for r in rows]
 
@@ -355,9 +410,9 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
 
     def _mac_label(m: dict) -> str:
         mac = m["mac"]
-        name = known_devices.get(mac, "")
-        prefix = f"[{name}] " if name else ""
-        return f"{prefix}{mac}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']} anchors)"
+        name = known_devices.get(mac, "") or _oui_lookup(mac)
+        tag = f"[{name}] " if name else ""
+        return f"{tag}{mac}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']}anc)"
 
     top_macs = store.get_top_macs(15)
     mac_options = [{"label": "All MACs (mixed)", "value": "__all__"}]
@@ -414,6 +469,8 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
                     dcc.Graph(id='room-3d', config={'displayModeBar': True}),
                 ], style={'flex': '3', 'minWidth': '500px'}),
                 html.Div([
+                    html.H4("Target Status", style={'margin': '10px 0 5px 0'}),
+                    html.Div(id='target-status-card'),
                     html.H4("Anchor Status", style={'margin': '10px 0 5px 0'}),
                     html.Div(id='anchor-status-cards'),
                     html.H4("Estimated Position", style={'margin': '15px 0 5px 0'}),
@@ -534,9 +591,9 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
         macs = store.get_top_macs(15)
         options = [{"label": "All MACs (mixed)", "value": "__all__"}]
         for m in macs:
-            name = refreshed_names.get(m["mac"], "")
-            prefix = f"[{name}] " if name else ""
-            label = f"{prefix}{m['mac']}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']} anchors)"
+            name = refreshed_names.get(m["mac"], "") or _oui_lookup(m["mac"])
+            tag = f"[{name}] " if name else ""
+            label = f"{tag}{m['mac']}  ({m['avg_rssi']} dBm, {m['count']} pkts, {m['n_anchors']}anc)"
             options.append({"label": label, "value": m["mac"]})
         return options
 
@@ -544,6 +601,7 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
     @app.callback(
         [Output('room-3d', 'figure'), Output('csi-waterfall', 'figure'),
          Output('rssi-timeline', 'figure'), Output('status-text', 'children'),
+         Output('target-status-card', 'children'),
          Output('anchor-status-cards', 'children'), Output('position-estimate', 'children')],
         [Input('interval', 'n_intervals')],
         [State('mac-selector', 'value'), State('settings-store', 'data')],
@@ -573,6 +631,46 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
             status = "Waiting for CSI data..."
 
         stale_threshold = LIVENESS_WINDOW_SEC * 2  # 2x liveness window = stale
+
+        # Target healthcheck — is the target ESP32 being seen by anchors?
+        TARGET_AP_MAC = "d0:cf:13:e0:00:c4"
+        target_liveness = store.get_anchor_liveness(TARGET_AP_MAC, window_sec=LIVENESS_WINDOW_SEC)
+        target_stats = store.get_stats(TARGET_AP_MAC)
+        tgt_total = target_stats["total"]
+        tgt_anchors_seeing = sum(1 for v in target_liveness.values() if v["rate"] > 0)
+        tgt_total_rate = sum(v["rate"] for v in target_liveness.values())
+
+        if tgt_anchors_seeing >= 3 and tgt_total_rate > 5:
+            tgt_color = '#4daf4a'
+            tgt_status = f"LIVE — {tgt_anchors_seeing}/4 anchors, {tgt_total_rate:.0f} pkt/s"
+        elif tgt_anchors_seeing >= 1:
+            tgt_color = '#ffc107'
+            tgt_status = f"PARTIAL — {tgt_anchors_seeing}/4 anchors, {tgt_total_rate:.0f} pkt/s"
+        elif tgt_total > 0:
+            min_age = min((v["age_sec"] for v in target_liveness.values()), default=9999)
+            tgt_color = '#dc3545'
+            tgt_status = f"STALE — last seen {min_age:.0f}s ago"
+        else:
+            tgt_color = '#ccc'
+            tgt_status = "NOT SEEN — target not transmitting or wrong channel"
+
+        target_card = html.Div([
+            html.Div(style={
+                'width': '12px', 'height': '12px', 'borderRadius': '50%',
+                'background': tgt_color, 'display': 'inline-block', 'marginRight': '8px'}),
+            html.Span("Target AP", style={'fontWeight': 'bold', 'fontSize': '14px'}),
+            html.Span(f"  {tgt_status}",
+                      style={'color': tgt_color, 'fontSize': '12px', 'fontWeight': 'bold', 'marginLeft': '6px'}),
+            html.Br(),
+            html.Span(f"  MAC: {TARGET_AP_MAC}  |  SSID: WiLoc_Target  |  CH: 6  |  {tgt_total} total pkts",
+                      style={'color': '#666', 'fontSize': '11px', 'marginLeft': '20px'}),
+            html.Br(),
+            html.Span("  Per-anchor: " + ", ".join(
+                f"{aid}={v['rate']}/s" for aid, v in sorted(target_liveness.items()) if v["rate"] > 0
+            ) if tgt_anchors_seeing > 0 else "  No anchors receiving target beacons",
+                      style={'color': '#888', 'fontSize': '11px', 'marginLeft': '20px'}),
+        ], style={'padding': '8px 10px', 'background': '#f0f8f0' if tgt_color == '#4daf4a' else '#fff8e1' if tgt_color == '#ffc107' else '#fff0f0' if tgt_color == '#dc3545' else '#f5f5f5',
+                  'borderRadius': '8px', 'border': f'1px solid {tgt_color}', 'marginBottom': '10px'})
 
         # Anchor status cards with accurate liveness
         cards = []
@@ -621,7 +719,7 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
         else:
             pos_text = html.Div("Need data from 3+ anchors", style={'color': '#999'})
 
-        return room_fig, waterfall_fig, rssi_fig, status, cards, pos_text
+        return room_fig, waterfall_fig, rssi_fig, status, target_card, cards, pos_text
 
     return app
 
@@ -632,7 +730,8 @@ def create_app(db_path: str, room: dict, anchors: dict) -> Dash:
 
 def main():
     parser = argparse.ArgumentParser(description="WiLoc Real-time Dashboard")
-    parser.add_argument("--db", default="wiloc_ble.db")
+    _project_root = Path(__file__).parent.parent
+    parser.add_argument("--db", default=str(_project_root / "wiloc_ble.db"))
     parser.add_argument("--room", nargs=3, type=float, default=None, metavar=("W", "D", "H"))
     parser.add_argument("--port", type=int, default=8050)
     parser.add_argument("--host", default="0.0.0.0")
