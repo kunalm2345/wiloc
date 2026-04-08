@@ -367,14 +367,24 @@
 
         // Position
         if (d.position) {
-            const rssiHtml = Object.entries(d.position.rssi).sort()
-                .map(([a,r]) => `<div class="pos-detail"><span style="color:${COLORS[a]}">●</span> ${a}: ${r.toFixed(1)} dBm</div>`).join('');
+            const dists = d.position.distances || {};
+            const methods = d.position.method || {};
+            const rssi = d.position.rssi || {};
+            const detailHtml = Object.keys(dists).sort().map(a => {
+                const m = methods[a] || '?';
+                const tag = m === 'csi_phase' ? '⚡' : '📶';
+                const r = rssi[a] ? ` (${rssi[a].toFixed(0)}dBm)` : '';
+                return `<div class="pos-detail"><span style="color:${COLORS[a]}">●</span> ${a}: ${dists[a]}m ${tag}${r}</div>`;
+            }).join('');
             document.getElementById('position').innerHTML = `
                 <div style="display:flex;justify-content:center;gap:20px">
                     <div class="pos-display"><div class="label">X</div>${d.position.x} m</div>
                     <div class="pos-display"><div class="label">Y</div>${d.position.y} m</div>
                 </div>
-                <div style="margin-top:8px">${rssiHtml}</div>`;
+                <div style="margin-top:8px;border-top:1px solid #1e2028;padding-top:6px">
+                    <div class="pos-detail" style="margin-bottom:4px">⚡ CSI phase &nbsp; 📶 RSSI fallback</div>
+                    ${detailHtml}
+                </div>`;
         } else {
             document.getElementById('position').innerHTML = '<div class="pos-detail">Need 3+ anchors</div>';
         }
